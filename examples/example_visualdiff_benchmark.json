@@ -1,0 +1,54 @@
+{
+  "benchmark_name": "visualdiff_example",
+  "description": "Example visual diff detection benchmark for TraceRAG",
+  "questions": [
+    {
+      "query_id": "vd001",
+      "query": "What changed for relay S1 between version 1 and version 2?",
+      "doc_id": "WIRING_DIAGRAM_X",
+      "old_version_id": "v1",
+      "new_version_id": "v2",
+      "change_type": "modified",
+      "key_tokens": ["relay", "K2", "routed"],
+      "bbox_old": [200.0, 450.0, 250.0, 480.0],
+      "bbox_new": [300.0, 400.0, 350.0, 430.0],
+      "page_old": "WIRING_DIAGRAM_X_v1_p5",
+      "page_new": "WIRING_DIAGRAM_X_v2_p5",
+      "metadata": {
+        "change_description": "Relay S1 now routed through K2 instead of direct connection"
+      }
+    },
+    {
+      "query_id": "vd002",
+      "query": "What component was added to the assembly in revision C?",
+      "doc_id": "MANUAL_001",
+      "old_version_id": "rev_B",
+      "new_version_id": "rev_C",
+      "change_type": "added",
+      "key_tokens": ["coupling", "bolt", "added"],
+      "bbox_old": null,
+      "bbox_new": [150.0, 200.0, 220.0, 250.0],
+      "page_old": "MANUAL_001_rev_B_p12",
+      "page_new": "MANUAL_001_rev_C_p12",
+      "metadata": {
+        "change_description": "New coupling bolt CFG-AX14-K2 added to assembly"
+      }
+    },
+    {
+      "query_id": "vd003",
+      "query": "How did the valve V-101 position change from Rev A to Rev B?",
+      "doc_id": "PID_SHEET_5",
+      "old_version_id": "rev_A",
+      "new_version_id": "rev_B",
+      "change_type": "moved",
+      "key_tokens": ["valve", "V-101", "moved", "relocated"],
+      "bbox_old": [100.0, 300.0, 150.0, 350.0],
+      "bbox_new": [350.0, 280.0, 400.0, 330.0],
+      "page_old": "PID_SHEET_5_rev_A_p1",
+      "page_new": "PID_SHEET_5_rev_B_p1",
+      "metadata": {
+        "change_description": "Valve V-101 relocated from lower left to upper right section"
+      }
+    }
+  ]
+}

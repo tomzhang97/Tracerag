@@ -1,0 +1,51 @@
+{
+  "benchmark_name": "microtext_example",
+  "description": "Example micro-text extraction benchmark for TraceRAG",
+  "questions": [
+    {
+      "query_id": "q001",
+      "query": "What is the part number for the coupling bolt?",
+      "doc_id": "MANUAL_001",
+      "version_id": "rev_C",
+      "answer_text": "CFG-AX14-K2",
+      "gt_page_id": "MANUAL_001_rev_C_p12",
+      "gt_object_id": "obj_1234",
+      "gt_bbox": [120.5, 340.2, 180.3, 355.8],
+      "font_height_px": 8.5,
+      "metadata": {
+        "component_type": "bolt",
+        "location": "assembly_diagram"
+      }
+    },
+    {
+      "query_id": "q002",
+      "query": "What is the configuration code for relay S1?",
+      "doc_id": "WIRING_DIAGRAM_X",
+      "version_id": "v2",
+      "answer_text": "S1-RLY-24V",
+      "gt_page_id": "WIRING_DIAGRAM_X_v2_p5",
+      "gt_object_id": "obj_567",
+      "gt_bbox": [200.1, 450.3, 265.7, 462.1],
+      "font_height_px": 6.2,
+      "metadata": {
+        "component_type": "relay",
+        "location": "power_circuit"
+      }
+    },
+    {
+      "query_id": "q003",
+      "query": "What is the valve identifier shown in the P&ID?",
+      "doc_id": "PID_SHEET_5",
+      "version_id": "rev_B",
+      "answer_text": "V-101",
+      "gt_page_id": "PID_SHEET_5_rev_B_p1",
+      "gt_object_id": "obj_89",
+      "gt_bbox": [350.0, 280.5, 385.2, 295.0],
+      "font_height_px": 10.0,
+      "metadata": {
+        "component_type": "valve",
+        "location": "process_flow"
+      }
+    }
+  ]
+}

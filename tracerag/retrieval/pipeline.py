@@ -19,6 +19,7 @@ from tracerag.common.types import (
 )
 from tracerag.retrieval.classifier import QueryClassifier
 from tracerag.retrieval.text_index import TextIndex
+from tracerag.retrieval.llm_answerer import LLMAnswerer
 from tracerag.visual.encoder import VisualPageEncoder
 from tracerag.visual.scorer import VisualScorer
 from tracerag.alignment.snapper import Snapper
@@ -98,6 +99,9 @@ class TraceRAGSystem:
             spatial_index=spatial_index,
             config=config.get("snapper", {})
         )
+
+        # Initialize LLM answerer
+        self.llm_answerer = LLMAnswerer(config.get("llm", {}))
 
         # Retrieval config
         self.top_k_pages = config.get("retrieval", {}).get("top_k_pages", 10)
@@ -215,7 +219,7 @@ class TraceRAGSystem:
         evidences: List[RegionEvidence]
     ) -> QueryResult:
         """
-        Compose natural language answer and extract certified claims.
+        Compose natural language answer and extract certified claims using LLM.
 
         Args:
             query: Query string
@@ -225,33 +229,45 @@ class TraceRAGSystem:
         Returns:
             QueryResult
         """
-        # For now, simple implementation
-        # Full implementation would use LLM for answer generation
-
         # Extract text from evidences
-        evidence_texts = []
-        for ev in evidences:
+        evidence_texts = {}
+        for ev in evidences[:20]:  # Limit to top 20
             obj = self.spatial_index.get_object(ev.object_id)
             if obj and obj.text:
-                evidence_texts.append(obj.text)
+                evidence_texts[ev.object_id] = obj.text
 
-        # Simple answer composition
+        # Handle no evidence case
         if not evidence_texts:
-            answer = "No relevant information found."
-            claims = []
-        else:
-            # Combine top evidence texts
-            context = " ".join(evidence_texts[:5])
-            answer = f"Based on the documents: {context[:500]}..."
+            return QueryResult(
+                query=query,
+                query_type=query_type,
+                answer="No relevant information found in the technical documents.",
+                certified_claims=[],
+                metadata={}
+            )
 
-            # Extract simple claims (placeholder for LLM-based extraction)
-            claims = self._extract_claims_simple(evidences)
+        # Use LLM to generate answer and extract claims
+        llm_result = self.llm_answerer.generate_answer_with_claims(
+            query=query,
+            evidences=evidences[:20],
+            evidence_texts=evidence_texts,
+            query_type=query_type
+        )
+
+        answer = llm_result.get("answer", "")
+        claims_data = llm_result.get("claims", [])
+
+        # Map claims to CertifiedClaim objects
+        certified_claims = self.llm_answerer.map_claims_to_evidences(
+            claims_data=claims_data,
+            evidences=evidences[:20]
+        )
 
         return QueryResult(
             query=query,
             query_type=query_type,
             answer=answer,
-            certified_claims=claims,
+            certified_claims=certified_claims,
             metadata={}
         )
 
