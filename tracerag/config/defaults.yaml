@@ -1,0 +1,96 @@
+# TraceRAG Default Configuration
+
+# Data paths
+data_root: "/data/tracerag"
+pdf_root: "${data_root}/pdfs"
+index_root: "${data_root}/index"
+cache_root: "${data_root}/cache"
+
+# Visual encoding settings
+visual:
+  model_name: "vidore/colpali-v1.2"  # ColPali model
+  patch_H: 32
+  patch_W: 32
+  dpi: 300
+  max_image_size: 1024
+  device: "cuda"  # cuda or cpu
+  batch_size: 4
+
+# Structural parsing settings
+structural:
+  parser: "pymupdf"  # pymupdf or pdfplumber
+  min_text_length: 1
+  extract_tables: true
+  extract_drawings: true
+  extract_images: false
+  vector_grouping:
+    enabled: true
+    proximity_threshold: 5.0  # pixels
+    layer_aware: true
+  table_detection:
+    min_rows: 2
+    min_cols: 2
+
+# Retrieval settings
+retrieval:
+  text_index_type: "bm25"  # bm25 or faiss
+  top_k_pages: 10
+  top_k_text: 20
+  hybrid_alpha: 0.5  # weight for text vs visual
+
+# Snapper (Vector-Native Alignment) settings
+snapper:
+  top_k_patches: 256
+  min_obj_score: 0.01
+  overlap_method: "iou"  # iou or weighted_iou
+  bbox_expansion: 0.0  # expand bboxes by N pixels
+
+# Graph construction settings
+graph:
+  stlg:
+    entity_matching:
+      method: "fuzzy"  # fuzzy or exact
+      threshold: 0.85
+    version_alignment:
+      visual_diff_threshold: 0.3
+      bbox_iou_threshold: 0.5
+  ldg:
+    reference_detection:
+      enabled: true
+      patterns:
+        - "see\\s+Fig\\.?\\s*(\\d+)"
+        - "Table\\s+(\\d+)"
+        - "Section\\s+([\\d\\.]+)"
+    cross_page_linking: true
+
+# LLM settings for answer generation
+llm:
+  model_name: "gpt-4-turbo"  # or local model path
+  temperature: 0.1
+  max_tokens: 2000
+  claim_extraction:
+    enabled: true
+    max_claims_per_answer: 5
+
+# Query classification
+query_classifier:
+  method: "heuristic"  # heuristic or trained
+  types:
+    - "locator"
+    - "attribute"
+    - "procedural"
+    - "revision"
+    - "diff"
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "${data_root}/logs/tracerag.log"
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} - {message}"
+
+# Performance
+performance:
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  compile_model: false  # torch.compile
