@@ -42,7 +42,7 @@ retrieval:
 snapper:
   top_k_patches: 256
   min_obj_score: 0.01
-  overlap_method: "iou"  # iou or weighted_iou
+  overlap_method: "coverage_weighted"  # Options: iou, coverage, coverage_weighted (strict design spec), weighted_iou (practical)
   bbox_expansion: 0.0  # expand bboxes by N pixels
 
 # Graph construction settings
@@ -54,6 +54,10 @@ graph:
     version_alignment:
       visual_diff_threshold: 0.3
       bbox_iou_threshold: 0.5
+    entity_resolution:
+      enabled: true
+      use_llm: false  # Set to true if LLM API available
+      temperature: 0.1
   ldg:
     reference_detection:
       enabled: true

@@ -13,6 +13,7 @@ from loguru import logger
 from tracerag.common.utils import load_config, setup_logging
 from tracerag.retrieval.text_index import TextIndex
 from tracerag.graph.stlg import STLayoutGraph
+from tracerag.graph.entity_resolver import EntityResolver
 
 
 app = typer.Typer()
@@ -24,6 +25,7 @@ def main(
     config_path: str = typer.Option(None, help="Path to config file (optional)"),
     build_text_index: bool = typer.Option(True, help="Build text index"),
     build_stlg: bool = typer.Option(True, help="Build STLG graph"),
+    extract_entities: bool = typer.Option(True, help="Extract entities using entity resolver"),
 ):
     """
     Build retrieval indexes from ingested documents.
@@ -49,6 +51,7 @@ def main(
     # Collect all objects from all documents/versions
     all_objects = []
     doc_versions = []
+    objects_by_doc_version = {}  # (doc_id, version_id) -> objects
 
     for doc_dir in struct_dir.iterdir():
         if not doc_dir.is_dir():
@@ -72,6 +75,7 @@ def main(
 
             all_objects.extend(objects)
             doc_versions.append((doc_id, version_id))
+            objects_by_doc_version[(doc_id, version_id)] = objects
 
             logger.info(f"Loaded {len(objects)} objects from {doc_id}/{version_id}")
 
@@ -119,6 +123,37 @@ def main(
 
             # Add region
             stlg.add_region(obj)
+
+        # Extract entities (if enabled)
+        if extract_entities:
+            logger.info("Extracting entities...")
+            entity_config = config.get("graph", {}).get("stlg", {}).get("entity_resolution", {})
+
+            if entity_config.get("enabled", True):
+                # Initialize entity resolver (with or without LLM)
+                llm_client = None  # Could initialize LLM client here if use_llm=True
+                entity_resolver = EntityResolver(llm_client, entity_config)
+
+                # Extract entities per document/version
+                all_entities = {}
+                for (doc_id, version_id), objects in objects_by_doc_version.items():
+                    logger.info(f"Extracting entities from {doc_id}/{version_id}...")
+                    entities = entity_resolver.extract_entities_from_objects(
+                        objects, doc_id, version_id
+                    )
+                    all_entities[(doc_id, version_id)] = entities
+
+                    # Add entities to STLG
+                    for entity_id, entity_data in entities.items():
+                        stlg.add_entity(entity_id, entity_data["label"], metadata=entity_data)
+
+                        # Link regions to entities
+                        for obj in entity_data.get("linked_objects", []):
+                            stlg.link_region_entity(obj.object_id, entity_id)
+
+                    logger.info(f"  → Added {len(entities)} entities to STLG")
+
+                logger.info(f"✓ Entity extraction complete")
 
         # Save
         stlg_file = index_root / "stlg.pkl"
