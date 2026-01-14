@@ -69,7 +69,24 @@ graph:
 
 # LLM settings for answer generation
 llm:
-  model_name: "gpt-4-turbo"  # or local model path
+  # OpenAI (hosted)
+  model_name: "gpt-4-turbo"
+  # api_key: "sk-..."  # Set via OPENAI_API_KEY environment variable
+
+  # OR Anthropic (hosted)
+  # model_name: "claude-3-sonnet-20240229"
+  # api_key: "..."  # Set via ANTHROPIC_API_KEY environment variable
+
+  # OR Local LLM via vLLM
+  # model_name: "meta-llama/Meta-Llama-3-8B-Instruct"
+  # base_url: "http://localhost:8000/v1"
+  # api_key: "EMPTY"
+
+  # OR Local LLM via Ollama
+  # model_name: "llama3"
+  # base_url: "http://localhost:11434/v1"
+  # api_key: "ollama"
+
   temperature: 0.1
   max_tokens: 2000
   claim_extraction:

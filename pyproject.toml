@@ -57,6 +57,7 @@ dev = [
 tracerag-ingest = "tracerag.cli.ingest_pdf:main"
 tracerag-build-index = "tracerag.cli.build_index:main"
 tracerag-search = "tracerag.cli.demo_search:main"
+tracerag-chat = "tracerag.cli.chat_raw:main"
 tracerag-eval = "tracerag.cli.run_eval:main"
 
 [tool.setuptools.packages.find]

@@ -16,6 +16,7 @@ from tracerag.retrieval.pipeline import TraceRAGSystem, PatchGridStore
 from tracerag.visual.encoder import VisualPageEncoder
 from tracerag.eval.microtext_eval import MicroTextEvaluator, MicroTextQuestion
 from tracerag.eval.visualdiff_eval import VisualDiffEvaluator, VisualDiffQuestion
+from tracerag.eval.eng_bench_loader import EngBenchLoader
 
 
 app = typer.Typer()
@@ -23,7 +24,7 @@ app = typer.Typer()
 
 @app.command()
 def main(
-    benchmark: str = typer.Option("microtext", help="Benchmark name (microtext or visualdiff)"),
+    benchmark: str = typer.Option("microtext", help="Benchmark name (eng_bench, microtext, or visualdiff)"),
     index_root: str = typer.Option(..., help="Index root directory"),
     data_path: str = typer.Option(..., help="Path to benchmark data file (JSON)"),
     config_path: str = typer.Option(None, help="Path to config file (optional)"),
@@ -33,6 +34,7 @@ def main(
     Run evaluation benchmarks.
 
     Benchmarks:
+    - eng_bench: General engineering QA benchmark
     - microtext: Micro-text extraction accuracy
     - visualdiff: Visual diff detection across versions
     """
@@ -46,14 +48,18 @@ def main(
     # Load TraceRAG system
     system = load_system(index_root, config)
 
-    # Load benchmark data
-    with open(data_path, 'r') as f:
-        benchmark_data = json.load(f)
-
     # Run appropriate benchmark
-    if benchmark == "microtext":
+    if benchmark == "eng_bench":
+        results = run_eng_bench_eval(system, data_path)
+    elif benchmark == "microtext":
+        # Load benchmark data
+        with open(data_path, 'r') as f:
+            benchmark_data = json.load(f)
         results = run_microtext_eval(system, benchmark_data)
     elif benchmark == "visualdiff":
+        # Load benchmark data
+        with open(data_path, 'r') as f:
+            benchmark_data = json.load(f)
         results = run_visualdiff_eval(system, benchmark_data)
     else:
         logger.error(f"Unknown benchmark: {benchmark}")
@@ -161,6 +167,76 @@ def run_microtext_eval(system: TraceRAGSystem, data: dict) -> dict:
     evaluator.print_summary(results)
 
     return results
+
+
+def run_eng_bench_eval(system: TraceRAGSystem, data_path: str) -> dict:
+    """Run engineering benchmark evaluation."""
+    logger.info("Running engineering benchmark evaluation")
+
+    # Load benchmark using robust loader
+    loader = EngBenchLoader(data_path)
+    queries = loader.load()
+
+    if not queries:
+        logger.error("No queries loaded from benchmark")
+        return {}
+
+    # Run queries and collect results
+    results = []
+    for i, query in enumerate(queries, 1):
+        logger.info(f"Processing query {i}/{len(queries)}: {query.query_id}")
+
+        try:
+            # Run query through TraceRAG
+            result = system.answer(query.query_text)
+
+            # Extract predicted answer
+            predicted_answer = result.answer
+
+            # Simple correctness check (would need more sophisticated matching in production)
+            correct = query.ground_truth_answer.lower() in predicted_answer.lower()
+
+            results.append({
+                "query_id": query.query_id,
+                "query": query.query_text,
+                "predicted_answer": predicted_answer,
+                "ground_truth": query.ground_truth_answer,
+                "correct": correct,
+                "num_claims": len(result.certified_claims),
+                "num_evidences": sum(len(c.evidences) for c in result.certified_claims),
+            })
+
+        except Exception as e:
+            logger.error(f"Error processing query {query.query_id}: {e}")
+            results.append({
+                "query_id": query.query_id,
+                "query": query.query_text,
+                "error": str(e),
+            })
+
+    # Compute aggregated metrics
+    valid_results = [r for r in results if "error" not in r]
+    accuracy = sum(r["correct"] for r in valid_results) / len(valid_results) if valid_results else 0.0
+
+    aggregated = {
+        "total_queries": len(queries),
+        "successful": len(valid_results),
+        "failed": len(results) - len(valid_results),
+        "accuracy": accuracy,
+        "per_query": results,
+    }
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("ENGINEERING BENCHMARK RESULTS")
+    print("=" * 60)
+    print(f"\nTotal Queries: {aggregated['total_queries']}")
+    print(f"Successful: {aggregated['successful']}")
+    print(f"Failed: {aggregated['failed']}")
+    print(f"Accuracy: {aggregated['accuracy']:.3f}")
+    print("=" * 60 + "\n")
+
+    return aggregated
 
 
 def run_visualdiff_eval(system: TraceRAGSystem, data: dict) -> dict:

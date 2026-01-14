@@ -34,24 +34,54 @@ class LLMAnswerer:
         self.client = self._init_client()
 
     def _init_client(self):
-        """Initialize LLM client based on model name."""
+        """
+        Initialize LLM client based on model name and configuration.
+
+        Supports:
+        - OpenAI (gpt-4, gpt-3.5-turbo)
+        - Anthropic (claude-*)
+        - Local models via vLLM/Ollama (any model with base_url)
+        """
+        # Check if local LLM endpoint is configured
+        base_url = self.config.get("base_url") or self.config.get("llm_base_url")
+        api_key = self.config.get("api_key") or self.config.get("llm_api_key", "EMPTY")
+
+        # Local LLM (vLLM/Ollama) - identified by base_url
+        if base_url:
+            try:
+                from openai import OpenAI
+                logger.info(f"Connecting to local LLM at {base_url}")
+                return OpenAI(
+                    api_key=api_key,  # Often "EMPTY" for vLLM, "ollama" for Ollama
+                    base_url=base_url
+                )
+            except ImportError:
+                logger.error("OpenAI library required for local LLM. Install: pip install openai")
+                return None
+
+        # OpenAI hosted models
         if "gpt" in self.model_name or "openai" in self.model_name:
             try:
                 from openai import OpenAI
-                return OpenAI()
+                logger.info(f"Using OpenAI model: {self.model_name}")
+                return OpenAI(api_key=api_key if api_key != "EMPTY" else None)
             except ImportError:
                 logger.warning("OpenAI client not available, using mock")
                 return None
+
+        # Anthropic models
         elif "claude" in self.model_name:
             try:
                 from anthropic import Anthropic
-                return Anthropic()
+                logger.info(f"Using Anthropic model: {self.model_name}")
+                return Anthropic(api_key=api_key if api_key != "EMPTY" else None)
             except ImportError:
                 logger.warning("Anthropic client not available, using mock")
                 return None
+
+        # Fallback to mock
         else:
-            # Local model or mock
-            logger.warning("Using mock LLM client")
+            logger.warning(f"Unknown model type '{self.model_name}', using mock LLM client")
             return None
 
     def generate_answer_with_claims(

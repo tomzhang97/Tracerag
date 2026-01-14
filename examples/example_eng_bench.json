@@ -1,0 +1,44 @@
+{
+  "questions": [
+    {
+      "id": "eq001",
+      "question": "What is the torque specification for the main coupling bolt?",
+      "answer": "50 Nm ±2 Nm",
+      "type": "attribute",
+      "pages": ["manual_p12", "manual_p15"],
+      "objects": ["obj_1234", "obj_5678"]
+    },
+    {
+      "id": "eq002",
+      "question": "Where is valve V-101 located in the P&ID diagram?",
+      "answer": "Section A-3, upstream of pump P-102",
+      "type": "locator",
+      "pages": ["pid_sheet_p1"],
+      "objects": ["obj_89"]
+    },
+    {
+      "id": "eq003",
+      "question": "What are the operating voltage requirements for relay S1?",
+      "answer": "24V DC nominal, 18-30V DC range",
+      "type": "attribute",
+      "pages": ["wiring_p5", "specs_p22"],
+      "objects": ["obj_456", "obj_789"]
+    },
+    {
+      "id": "eq004",
+      "question": "List the safety warnings for high-pressure testing procedures",
+      "answer": "1) Wear safety goggles, 2) Ensure pressure relief valve operational, 3) Maximum test pressure 150 PSI, 4) Evacuate area during test",
+      "type": "procedural",
+      "pages": ["safety_p8", "procedures_p45"],
+      "objects": ["obj_999", "obj_1001"]
+    },
+    {
+      "id": "eq005",
+      "question": "What changed in the wiring configuration between Rev B and Rev C?",
+      "answer": "Relay K2 was added to the control circuit, relay S1 now routes through K2 instead of direct connection",
+      "type": "revision",
+      "pages": ["wiring_rev_b_p5", "wiring_rev_c_p5"],
+      "objects": ["obj_300", "obj_301", "obj_302"]
+    }
+  ]
+}
