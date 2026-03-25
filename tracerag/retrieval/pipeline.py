@@ -99,9 +99,13 @@ class TraceRAGSystem:
             all_evidences.extend(evidences)
 
         # ================================================================
-        # Stage 3.5: Unified Evidence Re-Ranking
-        # Single pass with non-compounding boosts, all relative to the
-        # ORIGINAL max visual score (captured once, never recalculated).
+        # Stage 3.5: Scoring Contract Refactor
+        #
+        # Three independent channels assembled into final_score exactly once:
+        #   base_visual_score  — frozen after Snapper, never mutated again
+        #   symbolic_bonus     — text-match signal (entity codes, attributes, keywords)
+        #   doc_prior          — document-level folder/path signal (separate channel)
+        #   final_score        — base_visual_score + symbolic_bonus + doc_prior
         # ================================================================
         import re
         codes = re.findall(r'[A-Za-z0-9][A-Za-z0-9\-_.]{1,}', query)
@@ -112,131 +116,111 @@ class TraceRAGSystem:
         cn_segments = re.findall(r'[\u4e00-\u9fff]{2,}', query)
         cn_segments = [s for s in cn_segments if s not in cn_stop_words]
         summary_keywords = ['合计', '总计', '总重', '总净重', '总毛重', '共计', 'total', 'sum', 'subtotal']
-        
-        code_matched = False
-        
-        if all_evidences:
-            # Capture the original max score ONCE — all boosts are relative to this
-            base_max = max((ev.score for ev in all_evidences), default=1.0)
-            
-            # --- Sub-pass A: Build page-level and doc-level context maps ---
-            page_concepts = {}    # page_id -> set("entity", "attribute")
-            doc_context = {}      # doc_id  -> set("entity", "attribute")
-            
-            for ev in all_evidences:
-                # Doc-level: check folder path (only once per doc)
-                if ev.doc_id not in doc_context:
-                    doc_context[ev.doc_id] = set()
-                    path = self.manifest.get(ev.doc_id, "").lower() if self.manifest else ""
-                    if path:
-                        for code in codes:
-                            if code.lower() in path:
-                                doc_context[ev.doc_id].add("entity")
-                                break
-                        for seg in cn_segments:
-                            if seg in path:
-                                doc_context[ev.doc_id].add("attribute")
-                                break
-                
-                # Page-level: check text objects
-                obj = self.spatial_index.get_object(ev.object_id)
-                if not (obj and obj.text):
-                    continue
-                text = obj.text
-                text_lower = text.lower()
-                
-                if ev.page_id not in page_concepts:
-                    page_concepts[ev.page_id] = doc_context.get(ev.doc_id, set()).copy()
-                
+
+        # --- Freeze base_visual_score immediately after Snapper output ---
+        for ev in all_evidences:
+            ev.base_visual_score = ev.score
+
+        # --- Channel 1: doc_prior (folder/path signal, one value per document) ---
+        # Computed independently; never mixed into symbolic_bonus.
+        doc_prior_map: Dict[str, float] = {}
+        for ev in all_evidences:
+            if ev.doc_id in doc_prior_map:
+                continue
+            path = self.manifest.get(ev.doc_id, "").lower() if self.manifest else ""
+            prior = 0.0
+            if path:
                 for code in codes:
-                    if code.lower() in text_lower:
-                        page_concepts[ev.page_id].add("entity")
+                    if code.lower() in path:
+                        prior += 2.0
                         break
                 for seg in cn_segments:
-                    if seg in text or (len(seg) >= 2 and any(t in text for t in [seg[i:i+2] for i in range(len(seg)-1)])):
-                        page_concepts[ev.page_id].add("attribute")
+                    if seg in path:
+                        prior += 1.5
                         break
-            
-            # --- Sub-pass B: Apply boosts (all additive from base_max) ---
-            for ev in all_evidences:
-                obj = self.spatial_index.get_object(ev.object_id)
-                if not (obj and obj.text):
-                    continue
+            doc_prior_map[ev.doc_id] = prior
+
+        # --- Channel 2: symbolic_bonus (text-match signal, per evidence object) ---
+        code_matched = False
+        for ev in all_evidences:
+            obj = self.spatial_index.get_object(ev.object_id)
+            bonus = 0.0
+            if obj and obj.text:
                 text = obj.text
                 text_lower = text.lower()
-                bonus = 0.0
-                
-                # Tier 1: Entity match in THIS object's text (+4)
+
+                # Entity code match in this object's text (+4.0)
                 for code in codes:
                     if code.lower() in text_lower:
                         bonus += 4.0
                         code_matched = True
-                        break  # Only count entity once per object
-                
-                # Tier 2: Attribute match in THIS object's text (+3)
+                        break
+
+                # Attribute (Chinese segment) match in this object's text (+3.0)
                 for seg in cn_segments:
                     if seg in text or (len(seg) >= 2 and any(t in text for t in [seg[i:i+2] for i in range(len(seg)-1)])):
                         bonus += 3.0
                         break
-                
-                # Tier 3: Contextual Chinese terms (+0.5 each, capped at +2)
-                cn_bonus = 0.0
-                for cn in cn_terms:
-                    if cn in text:
-                        cn_bonus += 0.5
-                cn_bonus = min(cn_bonus, 2.0)
+
+                # Contextual Chinese bigrams (+0.5 each, capped at +2.0)
+                cn_bonus = min(sum(0.5 for cn in cn_terms if cn in text), 2.0)
                 bonus += cn_bonus
-                
-                # Tier 4: Page-level coverage — entity + attribute on same page (+8)
-                coverage = page_concepts.get(ev.page_id, set())
-                if "entity" in coverage and "attribute" in coverage:
-                    bonus += 8.0
-                
-                # Tier 5: Summary keyword — contains pre-computed total (+5)
+
+                # Summary/total keywords (+5.0)
                 for kw in summary_keywords:
                     if kw in text_lower:
                         bonus += 5.0
                         break
-                
-                # Apply bonus (all relative to original base_max)
-                if bonus > 0:
-                    ev.score += base_max * bonus
-                    if bonus >= 12.0:
-                        logger.info(f"High-confidence hit: {ev.object_id} on {ev.page_id} (bonus: +{bonus:.1f}x)")
-        
-        # Stage 3.6: Keyword Fallback Injection
-        # Only if NO evidence objects matched the entity codes at all
 
+            ev.symbolic_bonus = bonus
+            ev.doc_prior = doc_prior_map.get(ev.doc_id, 0.0)
+
+            # --- Assemble final_score exactly once per evidence ---
+            ev.score = ev.base_visual_score + ev.symbolic_bonus + ev.doc_prior
+            if bonus >= 9.0:
+                logger.info(
+                    f"High-confidence hit: {ev.object_id} on {ev.page_id} "
+                    f"(symbolic_bonus={bonus:.1f}, doc_prior={ev.doc_prior:.1f})"
+                )
+
+        # ================================================================
+        # Stage 3.6: Keyword Fallback — Candidate Expansion
+        #
+        # When no snapped object contained any query code symbolically,
+        # expand the candidate pool with keyword-matched objects.
+        # These enter with base_visual_score=0 and a proper symbolic_bonus;
+        # no artificial score injection is used.
+        # ================================================================
         if codes and not code_matched:
-            logger.info(f"No visual evidence matched codes {codes}. Injecting keyword-matched objects.")
-            existing_ids = set(ev.object_id for ev in all_evidences)
-            max_score = max((ev.score for ev in all_evidences), default=5.0)
-            
+            logger.info(f"No symbolic matches for {codes}. Expanding candidates via keyword search.")
+            existing_ids = {ev.object_id for ev in all_evidences}
+
             for page_id in candidate_page_ids:
-                page_objs = self.spatial_index.get_page_objects(page_id)
-                for obj in page_objs:
-                    if obj.object_id in existing_ids:
-                        continue
-                    if not obj.text:
+                for obj in self.spatial_index.get_page_objects(page_id):
+                    if obj.object_id in existing_ids or not obj.text:
                         continue
                     text_lower = obj.text.lower()
                     for code in codes:
                         if code.lower() in text_lower:
-                            # Inject as high-priority evidence
-                            injected = RegionEvidence(
+                            sym_bonus = 4.0  # entity code match
+                            d_prior = doc_prior_map.get(getattr(obj, 'doc_id', ''), 0.0)
+                            expanded = RegionEvidence(
                                 doc_id=getattr(obj, 'doc_id', ''),
                                 version_id=getattr(obj, 'version_id', ''),
                                 page_id=obj.page_id,
                                 object_id=obj.object_id,
                                 bbox=obj.bbox,
                                 obj_type=getattr(obj, 'obj_type', 'text_block'),
-                                extraction_method='keyword_fallback',
-                                score=max_score * 2.0,  # Boost above all visual evidence
+                                extraction_method='keyword_expansion',
+                                score=sym_bonus + d_prior,
+                                base_visual_score=0.0,
+                                symbolic_bonus=sym_bonus,
+                                doc_prior=d_prior,
                                 hash=getattr(obj, 'hash', ''),
                             )
-                            all_evidences.append(injected)
+                            all_evidences.append(expanded)
                             existing_ids.add(obj.object_id)
-                            logger.info(f"Injected keyword evidence: {obj.object_id} ({obj.text[:60]}...)")
+                            logger.info(f"Expanded candidate: {obj.object_id} ({obj.text[:60]})")
                             break
 
         # Stage 4: Assemble Evidence Pack

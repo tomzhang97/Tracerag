@@ -37,40 +37,65 @@ class DocumentAggregationProcessor:
         self.manifest = manifest
         self.spatial_index = spatial_index
 
-    def retrieve_candidate_documents(self, query: str) -> List[Tuple[str, float]]:
+    def compute_doc_prior(self, query: str) -> Dict[str, float]:
         """
-        Score documents based on fast metadata (folder, filename) and query overlap.
-        Returns a list of (doc_id, score)
+        Compute a doc_prior score for every document based on folder/filename overlap
+        with the query. Uses the same formula as the pipeline's scoring contract:
+          +2.0 per matched alphanumeric code (first match only)
+          +1.5 per matched Chinese segment (first match only)
+          +2.0 for filename alphanumeric match (first match only)
+          +1.5 for filename Chinese segment match (first match only)
+
+        Returns a dict mapping doc_id -> doc_prior (0.0 for non-matching docs).
         """
-        # Extract target entities from query (e.g. "LEHY-L-S", "型式试验")
-        # Very simple heuristic extraction for scoring
         alphanumerics = re.findall(r'[A-Za-z0-9][A-Za-z0-9\-_.]{1,}', query)
+        cn_stop_words = {'有哪些', '什么是', '列出', '多少', '怎么', '如何', '一个', '这张', '这些'}
         cn_chars = re.findall(r'[\u4e00-\u9fff]', query)
-        cn_terms = [cn_chars[i] + cn_chars[i+1] for i in range(len(cn_chars) - 1)] if len(cn_chars) > 1 else cn_chars
-        
-        doc_scores = {}
+        cn_segments = re.findall(r'[\u4e00-\u9fff]{2,}', query)
+        cn_segments = [s for s in cn_segments if s not in cn_stop_words]
+
+        doc_prior_map: Dict[str, float] = {}
         for doc_id, abs_path_str in self.manifest.items():
             path = Path(abs_path_str)
             folder_name = path.parent.name.lower()
             filename = path.stem.lower()
-            
-            score = 0.0
-            
-            # 1. Folder match
-            for term in cn_terms + alphanumerics:
-                if term.lower() in folder_name:
-                    score += 5.0  # Strong prior for correct functional folder
-                    
-            # 2. Filename match
-            for term in cn_terms + alphanumerics:
-                if term.lower() in filename:
-                    score += 5.0
-                    
-            if score > 0:
-                doc_scores[doc_id] = score
-                
-        # Sort docs by score
-        ranked_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+            prior = 0.0
+
+            # Folder signal
+            for code in alphanumerics:
+                if code.lower() in folder_name:
+                    prior += 2.0
+                    break
+            for seg in cn_segments:
+                if seg in folder_name:
+                    prior += 1.5
+                    break
+
+            # Filename signal
+            for code in alphanumerics:
+                if code.lower() in filename:
+                    prior += 2.0
+                    break
+            for seg in cn_segments:
+                if seg in filename:
+                    prior += 1.5
+                    break
+
+            doc_prior_map[doc_id] = prior
+
+        return doc_prior_map
+
+    def retrieve_candidate_documents(self, query: str) -> List[Tuple[str, float]]:
+        """
+        Rank documents by their doc_prior score (folder/filename overlap with query).
+        Returns a list of (doc_id, doc_prior) sorted descending, non-zero only.
+        """
+        doc_prior_map = self.compute_doc_prior(query)
+        ranked_docs = sorted(
+            ((doc_id, score) for doc_id, score in doc_prior_map.items() if score > 0),
+            key=lambda x: x[1],
+            reverse=True,
+        )
         return ranked_docs
 
     def extract_document_identity(self, doc_id: str) -> Dict[str, Any]:
@@ -149,57 +174,74 @@ class DocumentAggregationProcessor:
         return unique_docs
 
     def process(self, query: str) -> List[RegionEvidence]:
-        """Produce a fake/injected RegionEvidence list representing the documents."""
+        """
+        Produce a RegionEvidence list representing the unique documents matched.
+
+        Scoring uses the doc_prior from retrieve_candidate_documents as the
+        primary ranking signal.  Each evidence carries:
+          base_visual_score = 0.0   (no visual scoring in document-list mode)
+          symbolic_bonus    = 0.0   (no per-object text matching at this level)
+          doc_prior         = score computed from folder/filename overlap
+          score             = doc_prior (assembled once, consistent with pipeline contract)
+        """
         logger.info(f"Triggering Document-Level Aggregation for: {query}")
-        
+
+        # Retrieve candidates ranked by doc_prior
         candidates = self.retrieve_candidate_documents(query)
         logger.info(f"Found {len(candidates)} candidate documents based on folder/filename priors.")
-        
-        # Extract identities for top candidates (e.g. top 50)
+
+        # Build a doc_id -> doc_prior lookup for later injection
+        doc_prior_map: Dict[str, float] = {doc_id: prior for doc_id, prior in candidates}
+
+        # Extract identities for top candidates (top 50)
         identities = []
-        for doc_id, score in candidates[:50]:
+        for doc_id, prior in candidates[:50]:
             ident = self.extract_document_identity(doc_id)
+            ident["doc_prior"] = prior
             identities.append(ident)
-            
+
         # Deduplicate
         unique_docs = self.aggregate_documents(identities)
         logger.info(f"Deduplicated down to {len(unique_docs)} unique document identities.")
-        
+
         # Convert to RegionEvidence so the pipeline can consume it natively
+        from tracerag.common.types import VectorObject
         evidences = []
         for i, doc in enumerate(unique_docs):
-            # Create a synthetic evidence block describing the document
             display_text = f"【{doc['folder']}】 {doc['extracted_title']}"
             if doc['certificate_number']:
                 display_text += f" (编号/No: {doc['certificate_number']})"
-                
-            Synthetic_Ev = RegionEvidence(
+
+            d_prior = doc.get("doc_prior", doc_prior_map.get(doc["doc_id"], 0.0))
+
+            synthetic_ev = RegionEvidence(
                 doc_id=doc["doc_id"],
                 version_id="v1",
                 page_id=f"{doc['doc_id']}_v1_p0",
                 object_id=f"doc_agg_{i}",
-                bbox=(0,0,0,0),
+                bbox=(0, 0, 0, 0),
                 obj_type="document_identity",
                 extraction_method="document_aggregation",
-                score=100.0 - i, # Enforce synthetic ranking
+                score=d_prior,
+                base_visual_score=0.0,
+                symbolic_bonus=0.0,
+                doc_prior=d_prior,
                 hash="",
             )
-            
-            # We must monkey-patch the spatial index to return a dummy VectorObject 
-            # so `main.py` can print `obj.text` successfully!
-            from tracerag.common.types import VectorObject
+
+            # Register a dummy VectorObject so downstream consumers can read obj.text
             dummy_obj = VectorObject(
                 object_id=f"doc_agg_{i}",
                 doc_id=doc["doc_id"],
                 version_id="v1",
-                page_id=Synthetic_Ev.page_id,
-                bbox=(0,0,0,0),
+                page_id=synthetic_ev.page_id,
+                bbox=(0, 0, 0, 0),
                 obj_type="document_identity",
                 text=display_text,
                 path_ops=[],
             )
             self.spatial_index.add_object(dummy_obj)
-            
-            evidences.append(Synthetic_Ev)
-            
+
+            evidences.append(synthetic_ev)
+
         return evidences

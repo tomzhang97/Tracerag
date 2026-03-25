@@ -79,6 +79,12 @@ class RegionEvidence(TraceRAGBaseModel):
     """
     Represents a piece of evidence from the PDF, grounded to exact vector objects.
     Also known as SnappedEvidence.
+
+    Scoring channels (set after Snapper, never mutated individually after assembly):
+      base_visual_score  — frozen MaxSim score from Snapper; never changed after Stage 3
+      symbolic_bonus     — additive text-match signal (entity codes, attributes, keywords)
+      doc_prior          — additive document-level folder/path signal
+      score              — final_score = base_visual_score + symbolic_bonus + doc_prior
     """
     doc_id: DocumentID
     version_id: VersionID
@@ -89,6 +95,9 @@ class RegionEvidence(TraceRAGBaseModel):
     obj_type: str
     extraction_method: str
     score: float
+    base_visual_score: float = Field(default=0.0, description="Frozen MaxSim score from Snapper")
+    symbolic_bonus: float = Field(default=0.0, description="Text-match bonus (entity/attribute/keyword)")
+    doc_prior: float = Field(default=0.0, description="Document-level folder/path prior")
     hash: str = ""
 
 SnappedEvidence = RegionEvidence
