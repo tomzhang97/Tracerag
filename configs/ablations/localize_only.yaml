@@ -1,0 +1,5 @@
+name: tracerag_localize_only
+base_model: tracerag_full
+ablations:
+- no_vision
+- no_snap

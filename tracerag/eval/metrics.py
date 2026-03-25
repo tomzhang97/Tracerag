@@ -12,7 +12,7 @@ from typing import List, Set, Tuple
 import numpy as np
 
 from tracerag.common.types import BBox, RegionEvidence
-from tracerag.common.utils import bbox_iou
+from tracerag.common.geometry import bbox_iou
 
 
 def precision_at_k(retrieved: List[str], relevant: Set[str], k: int) -> float:

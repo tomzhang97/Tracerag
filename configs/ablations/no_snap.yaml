@@ -1,0 +1,4 @@
+name: tracerag_no_snap
+base_model: tracerag_full
+ablations:
+- no_snap

@@ -14,7 +14,8 @@ from loguru import logger
 from pathlib import Path
 
 from tracerag.common.types import PatchGrid
-from tracerag.common.utils import get_page_id
+from tracerag.common.io import get_page_id
+from tracerag.visual.render import render_page
 
 
 class VisualPageEncoder:
@@ -38,41 +39,71 @@ class VisualPageEncoder:
         self.patch_W = config.get("patch_W", 32)
         self.dpi = config.get("dpi", 300)
         self.max_image_size = config.get("max_image_size", 1024)
-        self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
         self.batch_size = config.get("batch_size", 4)
-
+        
+        # Handle device setting: "auto", "cuda", or "cpu"
+        device_config = config.get("device", "auto")
+        if device_config == "auto":
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device_config
+        
         logger.info(f"Initializing visual encoder: {self.model_name} on {self.device}")
+        self.processor = None
         self.model = self._load_model()
 
     def _load_model(self):
         """
         Load ColPali or compatible VLM.
 
-        Returns:
-            Loaded model
+        Loading priority:
+        1. colpali-engine package (correct loader for colpali-v1.2-merged)
+        2. transformers AutoModel (generic fallback)
+        3. Mock encoder (development fallback)
         """
-        try:
-            # Try to import ColPali components
-            # Note: This assumes ColPali is installed or integrated
-            # Placeholder for actual ColPali integration
-            from transformers import AutoModel, AutoProcessor
+        dtype = torch.float16 if self.device == "cuda" else torch.float32
 
-            # Load model and processor
-            processor = AutoProcessor.from_pretrained(self.model_name)
+        # --- Strategy 1: colpali-engine (official, correct key mapping) ---
+        try:
+            from colpali_engine.models import ColPali, ColPaliProcessor
+            logger.info(f"Loading ColPali via colpali-engine: {self.model_name}")
+            model = ColPali.from_pretrained(
+                self.model_name,
+                torch_dtype=dtype,
+                device_map=self.device,  # Use device_map instead of .to() to avoid meta tensor error
+            ).eval()
+            self.processor = ColPaliProcessor.from_pretrained(self.model_name)
+            self._loader = "colpali_engine"
+            logger.info("ColPali loaded successfully via colpali-engine")
+            return model
+        except ImportError:
+            logger.debug("colpali-engine not installed, trying AutoModel fallback")
+        except Exception as e:
+            logger.warning(f"colpali-engine load failed: {e}")
+
+        # --- Strategy 2: transformers AutoModel (generic, no vlm.* prefix issue) ---
+        try:
+            from transformers import AutoModel, AutoProcessor
+            logger.info(f"Loading model via AutoModel: {self.model_name}")
             model = AutoModel.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                torch_dtype=dtype,
+                device_map=self.device,
+                trust_remote_code=True,
+            ).eval()
+            self.processor = AutoProcessor.from_pretrained(
+                self.model_name, trust_remote_code=True
             )
-            model = model.to(self.device)
-            model.eval()
-
-            self.processor = processor
+            self._loader = "auto_model"
+            logger.info("Model loaded successfully via AutoModel")
             return model
-
         except Exception as e:
-            logger.warning(f"Failed to load ColPali model: {e}")
-            logger.warning("Falling back to mock encoder (for development)")
-            return self._create_mock_model()
+            logger.warning(f"AutoModel load failed: {e}")
+
+        # --- Strategy 3: Mock encoder ---
+        logger.warning("All model loading strategies failed. Using mock encoder.")
+        self._loader = "mock"
+        return self._create_mock_model()
 
     def _create_mock_model(self):
         """Create a mock model for testing without actual VLM."""
@@ -86,39 +117,16 @@ class VisualPageEncoder:
 
         return MockModel(self.device)
 
-    def render_page(self, pdf_path: str, page_idx: int) -> Image.Image:
-        """
-        Render PDF page as high-resolution image.
 
-        Args:
-            pdf_path: Path to PDF file
-            page_idx: Page index (0-indexed)
-
-        Returns:
-            PIL Image
-        """
-        doc = fitz.open(pdf_path)
-        if page_idx >= len(doc):
-            raise ValueError(f"Page index {page_idx} out of range for PDF with {len(doc)} pages")
-
-        page = doc[page_idx]
-
-        # Render at specified DPI
-        mat = fitz.Matrix(self.dpi / 72, self.dpi / 72)
-        pix = page.get_pixmap(matrix=mat)
-
-        # Convert to PIL Image
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-        doc.close()
-        return img
 
     def encode_page(
         self,
         image: Image.Image,
         doc_id: str,
         version_id: str,
-        page_num: int
+        page_num: int,
+        w_pdf: float,
+        h_pdf: float
     ) -> PatchGrid:
         """
         Encode page image as patch grid with embeddings.
@@ -128,13 +136,15 @@ class VisualPageEncoder:
             doc_id: Document ID
             version_id: Version ID
             page_num: Page number
+            w_pdf: Original PDF point width
+            h_pdf: Original PDF point height
 
         Returns:
             PatchGrid with embeddings
         """
         page_id = get_page_id(doc_id, version_id, page_num)
 
-        # Store original size
+        # Store original size (for internal tracking if needed)
         w_orig, h_orig = image.size
 
         # Resize to model input size
@@ -145,14 +155,30 @@ class VisualPageEncoder:
             if hasattr(self.model, 'encode_image'):
                 # Mock model
                 embeddings_tensor = self.model.encode_image(img_resized)
+
+            elif self._loader == "colpali_engine":
+                # colpali-engine: use process_images + forward
+                batch = self.processor.process_images([img_resized]).to(self.device)
+                outputs = self.model(**batch)
+                embeddings_tensor = outputs
+
             else:
-                # Real model (placeholder - actual implementation depends on ColPali API)
-                # This would use the processor and model to get patch embeddings
-                inputs = self.processor(images=img_resized, return_tensors="pt")
+                # AutoModel / PaliGemma path
+                # PaliGemma requires a text prefix with <image> token
+                dummy_text = "<image>"  # Required prefix for PaliGemma
+                inputs = self.processor(
+                    text=dummy_text,
+                    images=img_resized,
+                    return_tensors="pt",
+                    padding="longest",
+                )
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 outputs = self.model(**inputs)
-                # Extract patch embeddings (shape depends on model architecture)
-                embeddings_tensor = outputs.last_hidden_state  # Placeholder
+                # Extract patch embeddings
+                if hasattr(outputs, "last_hidden_state"):
+                    embeddings_tensor = outputs.last_hidden_state
+                else:
+                    embeddings_tensor = outputs[0]
 
         # Convert to numpy
         embeddings = embeddings_tensor.cpu().numpy()
@@ -169,10 +195,10 @@ class VisualPageEncoder:
 
         H, W, d = embeddings.shape
 
-        # Calculate patch bounding boxes in original page coordinates
+        # Calculate patch bounding boxes in PDF point coordinates
         patch_boxes = np.zeros((H, W, 4), dtype=np.float32)
-        patch_w = w_orig / W
-        patch_h = h_orig / H
+        patch_w = w_pdf / W
+        patch_h = h_pdf / H
 
         for i in range(H):
             for j in range(W):
@@ -215,21 +241,24 @@ class VisualPageEncoder:
 
         doc = fitz.open(pdf_path)
         num_pages = len(doc)
-        doc.close()
 
         patch_grids = []
 
         for page_idx in range(num_pages):
-            logger.debug(f"Encoding page {page_idx}/{num_pages}")
+            page = doc[page_idx]
+            w_pdf, h_pdf = page.rect.width, page.rect.height
+            logger.debug(f"Encoding page {page_idx}/{num_pages} ({w_pdf:.1f}x{h_pdf:.1f} points)")
 
             # Render and encode
-            image = self.render_page(pdf_path, page_idx)
-            patch_grid = self.encode_page(image, doc_id, version_id, page_idx)
+            image = render_page(pdf_path, page_idx, dpi=self.dpi)
+            patch_grid = self.encode_page(image, doc_id, version_id, page_idx, w_pdf, h_pdf)
             patch_grids.append(patch_grid)
 
             # Optionally save to disk
             if output_dir:
                 self._save_patch_grid(patch_grid, output_dir)
+                
+        doc.close()
 
         logger.info(f"Encoded {num_pages} pages")
         return patch_grids

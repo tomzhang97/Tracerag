@@ -10,7 +10,8 @@ from pathlib import Path
 import pickle
 from loguru import logger
 
-from tracerag.common.utils import load_config, setup_logging, ensure_dir
+from tracerag.common.config import load_config, setup_logging
+from tracerag.common.io import ensure_dir
 from tracerag.structural.parser import PdfStructuralParser
 from tracerag.visual.encoder import VisualPageEncoder
 

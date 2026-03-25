@@ -30,7 +30,17 @@ class VisualScorer:
         """
         self.config = config
         self.encoder = encoder
-        self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Use encoder's device if available (it has already resolved "auto")
+        if encoder is not None and hasattr(encoder, 'device'):
+            self.device = encoder.device
+        else:
+            # Handle device setting: "auto", "cuda", or "cpu"
+            device_config = config.get("device", "auto")
+            if device_config == "auto":
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                self.device = device_config
 
     def encode_query(self, query: str) -> np.ndarray:
         """
@@ -42,7 +52,7 @@ class VisualScorer:
         Returns:
             Query embeddings [num_tokens, d]
         """
-        if self.encoder is None or not hasattr(self.encoder, 'processor'):
+        if self.encoder is None or getattr(self.encoder, 'processor', None) is None:
             # Mock implementation
             logger.debug("Using mock query encoder")
             # Return random query embeddings
@@ -51,13 +61,39 @@ class VisualScorer:
         # Real implementation would use the processor to tokenize and embed
         try:
             with torch.no_grad():
-                inputs = self.encoder.processor(
-                    text=query,
-                    return_tensors="pt"
-                )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                # Check for colpali-engine specific processing
+                if hasattr(self.encoder, '_loader') and self.encoder._loader == "colpali_engine":
+                    # colpali-engine expects a list of queries
+                    inputs = self.encoder.processor.process_queries([query]).to(self.device)
+                else:
+                    # Standard AutoProcessor/PaliGemmaProcessor
+                    # (PaliGemma requires images if we use the generic __call__, 
+                    # but we can try to trick it or use a simpler tokenize path)
+                    try:
+                        inputs = self.encoder.processor(text=query, return_tensors="pt")
+                    except ValueError as e:
+                        if "images` are expected" in str(e):
+                            # Fallback: add image tokens if PaliGemma is being picky
+                            inputs = self.encoder.processor(text=f"<image>{query}", return_tensors="pt")
+                        else:
+                            raise
+                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
                 outputs = self.encoder.model(**inputs)
-                query_embeds = outputs.last_hidden_state.cpu().numpy()[0]  # [num_tokens, d]
+                
+                # Handle different output formats
+                if hasattr(outputs, 'embeddings') and outputs.embeddings is not None:
+                    # ColPaliForRetrieval uses 'embeddings' attribute
+                    query_embeds = outputs.embeddings.cpu().numpy()
+                elif hasattr(outputs, 'last_hidden_state'):
+                    query_embeds = outputs.last_hidden_state.cpu().numpy()
+                else:
+                    query_embeds = outputs[0].cpu().numpy()
+                
+                # Handle batch dimension [1, num_tokens, d] -> [num_tokens, d]
+                if len(query_embeds.shape) == 3:
+                    query_embeds = query_embeds[0]
+                
                 return query_embeds
         except Exception as e:
             logger.warning(f"Failed to encode query: {e}, using mock")

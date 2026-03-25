@@ -10,7 +10,7 @@ from pathlib import Path
 import pickle
 from loguru import logger
 
-from tracerag.common.utils import load_config, setup_logging
+from tracerag.common.config import load_config, setup_logging
 from tracerag.retrieval.text_index import TextIndex
 from tracerag.graph.stlg import STLayoutGraph
 from tracerag.graph.entity_resolver import EntityResolver

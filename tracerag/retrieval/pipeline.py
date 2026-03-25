@@ -2,317 +2,295 @@
 TraceRAG main retrieval pipeline.
 
 Orchestrates the complete query flow:
-1. Query classification
-2. Text-based candidate retrieval
-3. Visual scoring
-4. Vector-native alignment (Snapper)
-5. Graph expansion
-6. Claim extraction and certification
+1. Load Candidate Pages
+2. Score Patches (Visual Encoding & Interaction)
+3. Snap To Objects (Vector-Native Alignment)
+4. Assemble Evidence Pack
+5. (Optional) Generate Answer Synthesis
 """
 
 import time
 from typing import Dict, Any, List, Optional
 from loguru import logger
+from tracerag.common.types import RegionEvidence
 
-from tracerag.common.types import (
-    PatchGrid, RegionEvidence, QueryResult, CertifiedClaim, Claim
-)
-from tracerag.retrieval.classifier import QueryClassifier
-from tracerag.retrieval.text_index import TextIndex
+from tracerag.common.types import PatchGrid, VectorObject
+from tracerag.alignment.snapper import SnapperConfig, PatchRelevanceMap, ParsedPageObjects, snap_page_relevance_to_objects
+from tracerag.retrieval.candidate_filter import CandidateFilter
+from tracerag.retrieval.evidence_pack import EvidencePack
 from tracerag.retrieval.llm_answerer import LLMAnswerer
-from tracerag.visual.encoder import VisualPageEncoder
 from tracerag.visual.scorer import VisualScorer
-from tracerag.alignment.snapper import Snapper
-from tracerag.graph.stlg import STLayoutGraph
-from tracerag.graph.ldg import LayoutDependencyGraph
-from tracerag.structural.parser import PdfSpatialIndex
+from tracerag.structural.index import PdfSpatialIndex
 
 
 class PatchGridStore:
     """Simple in-memory store for PatchGrids."""
-
     def __init__(self):
         self.grids: Dict[str, PatchGrid] = {}
-
     def add(self, patch_grid: PatchGrid):
-        """Add patch grid."""
         self.grids[patch_grid.page_id] = patch_grid
-
     def get(self, page_id: str) -> Optional[PatchGrid]:
-        """Get patch grid by page ID."""
         return self.grids.get(page_id)
-
     def get_batch(self, page_ids: List[str]) -> List[PatchGrid]:
-        """Get multiple patch grids."""
         return [self.grids[pid] for pid in page_ids if pid in self.grids]
 
 
 class TraceRAGSystem:
-    """
-    Main TraceRAG retrieval system.
-
-    Combines all components into a unified pipeline.
-    """
+    """Main TraceRAG retrieval system. Combines all components into a flattened pipeline."""
 
     def __init__(
         self,
         config: Dict[str, Any],
-        text_index: TextIndex,
+        candidate_filter: CandidateFilter,
         patch_grid_store: PatchGridStore,
         spatial_index: PdfSpatialIndex,
-        visual_encoder: VisualPageEncoder,
-        stlg: Optional[STLayoutGraph] = None,
-        ldg: Optional[LayoutDependencyGraph] = None,
+        visual_scorer: VisualScorer,
+        llm_answerer: Optional[LLMAnswerer] = None,
+        manifest: Optional[Dict[str, str]] = None,
     ):
-        """
-        Initialize TraceRAG system.
-
-        Args:
-            config: Configuration dictionary
-            text_index: Text index for candidate retrieval
-            patch_grid_store: Store for visual patch grids
-            spatial_index: Spatial index for vector objects
-            visual_encoder: Visual encoder for scoring
-            stlg: Optional Spatio-Temporal Layout Graph
-            ldg: Optional Layout Dependency Graph
-        """
         self.config = config
-        self.text_index = text_index
+        self.candidate_filter = candidate_filter
         self.patch_grid_store = patch_grid_store
         self.spatial_index = spatial_index
-        self.visual_encoder = visual_encoder
-
-        self.stlg = stlg
-        self.ldg = ldg
-
-        # Initialize components
-        self.classifier = QueryClassifier(
-            method=config.get("query_classifier", {}).get("method", "heuristic")
-        )
-
-        self.visual_scorer = VisualScorer(
-            config=config.get("visual", {}),
-            encoder=visual_encoder
-        )
-
-        self.snapper = Snapper(
-            spatial_index=spatial_index,
-            config=config.get("snapper", {})
-        )
-
-        # Initialize LLM answerer
-        self.llm_answerer = LLMAnswerer(config.get("llm", {}))
-
-        # Retrieval config
-        self.top_k_pages = config.get("retrieval", {}).get("top_k_pages", 10)
-        self.hybrid_alpha = config.get("retrieval", {}).get("hybrid_alpha", 0.5)
-
+        self.visual_scorer = visual_scorer
+        self.llm_answerer = llm_answerer
+        self.manifest = manifest or {}
+        
+        self.snapper_config = SnapperConfig(**config.get("snapper", {}))
         logger.info("TraceRAG system initialized")
 
-    def answer(
-        self,
-        query: str,
-        query_type: Optional[str] = None,
-        return_evidences: bool = True
-    ) -> QueryResult:
-        """
-        Main entry point: answer a query with certified claims.
-
-        Args:
-            query: Query string
-            query_type: Optional pre-classified query type
-            return_evidences: Whether to return full evidence objects
-
-        Returns:
-            QueryResult with answer and certified claims
-        """
+    def answer(self, query: str) -> EvidencePack:
+        """Main entry point: execute the full retrieval pipeline linearly."""
         start_time = time.time()
-
         logger.info(f"Processing query: {query}")
 
-        # Step 1: Classify query
-        if query_type is None:
-            query_type = self.classifier.classify(query)
-
-        logger.info(f"Query type: {query_type}")
-
-        # Step 2: Retrieve candidate pages
-        candidate_page_ids = self._retrieve_candidate_pages(query, query_type)
-
+        # Stage 1: Load Candidate Pages
+        candidate_page_ids = self.candidate_filter.get_candidate_pages(query)
         logger.info(f"Retrieved {len(candidate_page_ids)} candidate pages")
 
-        # Step 3: Visual scoring
+        # Stage 2: Score Patches
         patch_grids = self.patch_grid_store.get_batch(candidate_page_ids)
         scored_pages = self.visual_scorer.score_pages_batch(query, patch_grids)
 
-        # Step 4: Vector-native alignment (Snapper)
-        all_evidences: List[RegionEvidence] = []
-
-        for page_id, page_score, patch_scores in scored_pages:
+        # Stage 3: Snap to Objects (Vector Alignment)
+        all_evidences = []
+        for page_id, _, patch_scores in scored_pages:
             patch_grid = self.patch_grid_store.get(page_id)
-            if patch_grid is None:
-                continue
+            if not patch_grid: continue
 
-            evidences = self.snapper.snap_page(patch_grid, patch_scores)
+            # Construct inputs for pure function Snapper
+            relevance_map = PatchRelevanceMap(
+                page_id=page_id,
+                grid_h=patch_grid.H,
+                grid_w=patch_grid.W,
+                scores=patch_scores,
+                patch_boxes=patch_grid.patch_boxes
+            )
+            
+            # Since we just have a global spatial index for now, we provide it.
+            # In a distributed system we'd pull page-specific objects.
+            page_objects = ParsedPageObjects(
+                page_id=page_id,
+                objects=self.spatial_index.get_page_objects(page_id),
+                spatial_index=self.spatial_index
+            )
+
+            evidences = snap_page_relevance_to_objects(relevance_map, page_objects, self.snapper_config)
             all_evidences.extend(evidences)
 
-        logger.info(f"Generated {len(all_evidences)} initial evidences")
+        # ================================================================
+        # Stage 3.5: Unified Evidence Re-Ranking
+        # Single pass with non-compounding boosts, all relative to the
+        # ORIGINAL max visual score (captured once, never recalculated).
+        # ================================================================
+        import re
+        codes = re.findall(r'[A-Za-z0-9][A-Za-z0-9\-_.]{1,}', query)
+        cn_stop_words = {'有哪些', '什么是', '列出', '多少', '怎么', '如何', '一个', '这张', '这些'}
+        cn_chars = re.findall(r'[\u4e00-\u9fff]', query)
+        cn_terms = [cn_chars[i] + cn_chars[i+1] for i in range(len(cn_chars) - 1)]
+        cn_terms = [t for t in cn_terms if t not in cn_stop_words]
+        cn_segments = re.findall(r'[\u4e00-\u9fff]{2,}', query)
+        cn_segments = [s for s in cn_segments if s not in cn_stop_words]
+        summary_keywords = ['合计', '总计', '总重', '总净重', '总毛重', '共计', 'total', 'sum', 'subtotal']
+        
+        code_matched = False
+        
+        if all_evidences:
+            # Capture the original max score ONCE — all boosts are relative to this
+            base_max = max((ev.score for ev in all_evidences), default=1.0)
+            
+            # --- Sub-pass A: Build page-level and doc-level context maps ---
+            page_concepts = {}    # page_id -> set("entity", "attribute")
+            doc_context = {}      # doc_id  -> set("entity", "attribute")
+            
+            for ev in all_evidences:
+                # Doc-level: check folder path (only once per doc)
+                if ev.doc_id not in doc_context:
+                    doc_context[ev.doc_id] = set()
+                    path = self.manifest.get(ev.doc_id, "").lower() if self.manifest else ""
+                    if path:
+                        for code in codes:
+                            if code.lower() in path:
+                                doc_context[ev.doc_id].add("entity")
+                                break
+                        for seg in cn_segments:
+                            if seg in path:
+                                doc_context[ev.doc_id].add("attribute")
+                                break
+                
+                # Page-level: check text objects
+                obj = self.spatial_index.get_object(ev.object_id)
+                if not (obj and obj.text):
+                    continue
+                text = obj.text
+                text_lower = text.lower()
+                
+                if ev.page_id not in page_concepts:
+                    page_concepts[ev.page_id] = doc_context.get(ev.doc_id, set()).copy()
+                
+                for code in codes:
+                    if code.lower() in text_lower:
+                        page_concepts[ev.page_id].add("entity")
+                        break
+                for seg in cn_segments:
+                    if seg in text or (len(seg) >= 2 and any(t in text for t in [seg[i:i+2] for i in range(len(seg)-1)])):
+                        page_concepts[ev.page_id].add("attribute")
+                        break
+            
+            # --- Sub-pass B: Apply boosts (all additive from base_max) ---
+            for ev in all_evidences:
+                obj = self.spatial_index.get_object(ev.object_id)
+                if not (obj and obj.text):
+                    continue
+                text = obj.text
+                text_lower = text.lower()
+                bonus = 0.0
+                
+                # Tier 1: Entity match in THIS object's text (+4)
+                for code in codes:
+                    if code.lower() in text_lower:
+                        bonus += 4.0
+                        code_matched = True
+                        break  # Only count entity once per object
+                
+                # Tier 2: Attribute match in THIS object's text (+3)
+                for seg in cn_segments:
+                    if seg in text or (len(seg) >= 2 and any(t in text for t in [seg[i:i+2] for i in range(len(seg)-1)])):
+                        bonus += 3.0
+                        break
+                
+                # Tier 3: Contextual Chinese terms (+0.5 each, capped at +2)
+                cn_bonus = 0.0
+                for cn in cn_terms:
+                    if cn in text:
+                        cn_bonus += 0.5
+                cn_bonus = min(cn_bonus, 2.0)
+                bonus += cn_bonus
+                
+                # Tier 4: Page-level coverage — entity + attribute on same page (+8)
+                coverage = page_concepts.get(ev.page_id, set())
+                if "entity" in coverage and "attribute" in coverage:
+                    bonus += 8.0
+                
+                # Tier 5: Summary keyword — contains pre-computed total (+5)
+                for kw in summary_keywords:
+                    if kw in text_lower:
+                        bonus += 5.0
+                        break
+                
+                # Apply bonus (all relative to original base_max)
+                if bonus > 0:
+                    ev.score += base_max * bonus
+                    if bonus >= 12.0:
+                        logger.info(f"High-confidence hit: {ev.object_id} on {ev.page_id} (bonus: +{bonus:.1f}x)")
+        
+        # Stage 3.6: Keyword Fallback Injection
+        # Only if NO evidence objects matched the entity codes at all
 
-        # Step 5: Graph expansion (if available)
-        if self.stlg and query_type in ("revision", "diff"):
-            all_evidences = self.stlg.expand_from_evidences(all_evidences, max_hops=2)
-            logger.info(f"Expanded to {len(all_evidences)} evidences via STLG")
+        if codes and not code_matched:
+            logger.info(f"No visual evidence matched codes {codes}. Injecting keyword-matched objects.")
+            existing_ids = set(ev.object_id for ev in all_evidences)
+            max_score = max((ev.score for ev in all_evidences), default=5.0)
+            
+            for page_id in candidate_page_ids:
+                page_objs = self.spatial_index.get_page_objects(page_id)
+                for obj in page_objs:
+                    if obj.object_id in existing_ids:
+                        continue
+                    if not obj.text:
+                        continue
+                    text_lower = obj.text.lower()
+                    for code in codes:
+                        if code.lower() in text_lower:
+                            # Inject as high-priority evidence
+                            injected = RegionEvidence(
+                                doc_id=getattr(obj, 'doc_id', ''),
+                                version_id=getattr(obj, 'version_id', ''),
+                                page_id=obj.page_id,
+                                object_id=obj.object_id,
+                                bbox=obj.bbox,
+                                obj_type=getattr(obj, 'obj_type', 'text_block'),
+                                extraction_method='keyword_fallback',
+                                score=max_score * 2.0,  # Boost above all visual evidence
+                                hash=getattr(obj, 'hash', ''),
+                            )
+                            all_evidences.append(injected)
+                            existing_ids.add(obj.object_id)
+                            logger.info(f"Injected keyword evidence: {obj.object_id} ({obj.text[:60]}...)")
+                            break
 
-        # Step 6: Rank and filter evidences
-        all_evidences = sorted(all_evidences, key=lambda e: e.score, reverse=True)
-        top_evidences = all_evidences[:20]  # Keep top 20
-
-        # Step 7: Compose answer and extract claims
-        result = self._compose_answer_with_certificates(
-            query, query_type, top_evidences
-        )
-
-        # Add metadata
-        elapsed_time = time.time() - start_time
-        result.metadata = {
-            "elapsed_time": elapsed_time,
-            "query_type": query_type,
-            "num_candidate_pages": len(candidate_page_ids),
-            "num_evidences": len(top_evidences),
-        }
-
-        logger.info(f"Query answered in {elapsed_time:.2f}s")
-
-        return result
-
-    def _retrieve_candidate_pages(
-        self,
-        query: str,
-        query_type: str
-    ) -> List[str]:
-        """
-        Retrieve candidate pages using hybrid text + visual retrieval.
-
-        Args:
-            query: Query string
-            query_type: Query type
-
-        Returns:
-            List of page IDs
-        """
-        # For now, use text index
-        # In full implementation, would combine with visual retrieval
-
-        if query_type in ("locator", "attribute"):
-            # Identifier-focused queries: use text index
-            page_ids = self.text_index.get_page_ids(query, self.top_k_pages)
+        # Stage 4: Assemble Evidence Pack
+        from tracerag.retrieval.aggregation import AggregationProcessor
+        from tracerag.retrieval.document_aggregation import classify_aggregation_scope, DocumentAggregationProcessor
+        
+        agg_processor = AggregationProcessor()
+        
+        if agg_processor.is_aggregation_query(query):
+            scope = classify_aggregation_scope(query)
+            if scope == "document_list":
+                logger.info("Routing query to Document-Level Aggregation Mode")
+                doc_agg_processor = DocumentAggregationProcessor(self.manifest, self.spatial_index)
+                all_evidences = doc_agg_processor.process(query)
+            else:
+                logger.info("Routing query to Object-Level Aggregation Mode")
+                # Collection Mode (High Recall + Deduplication)
+                all_evidences = agg_processor.process(query, all_evidences, self.spatial_index)
         else:
-            # Broader queries: use text index but retrieve more
-            page_ids = self.text_index.get_page_ids(query, self.top_k_pages * 2)
+            # Standard Precision Mode (Top-K)
+            # Increase limit to 50 to accommodate longer lists (e.g., 21+ boxes)
+            all_evidences = sorted(all_evidences, key=lambda e: e.score, reverse=True)[:50]
+            
+        pack = EvidencePack(query=query, evidences=all_evidences)
+        
+        # Stage 5: (Optional) Answer Synthesis
+        if self.llm_answerer:
+            self._synthesize_answer(pack)
 
-        return page_ids
+        pack.metadata["elapsed_time"] = time.time() - start_time
+        pack.metadata["num_candidate_pages"] = len(candidate_page_ids)
+        logger.info(f"Query answered in {pack.metadata['elapsed_time']:.2f}s")
 
-    def _compose_answer_with_certificates(
-        self,
-        query: str,
-        query_type: str,
-        evidences: List[RegionEvidence]
-    ) -> QueryResult:
-        """
-        Compose natural language answer and extract certified claims using LLM.
+        return pack
 
-        Args:
-            query: Query string
-            query_type: Query type
-            evidences: List of evidence regions
-
-        Returns:
-            QueryResult
-        """
-        # Extract text from evidences
+    def _synthesize_answer(self, pack: EvidencePack):
+        """Populate the EvidencePack with an LLM-synthesized answer."""
         evidence_texts = {}
-        for ev in evidences[:20]:  # Limit to top 20
+        for ev in pack.evidences:
             obj = self.spatial_index.get_object(ev.object_id)
             if obj and obj.text:
                 evidence_texts[ev.object_id] = obj.text
 
-        # Handle no evidence case
         if not evidence_texts:
-            return QueryResult(
-                query=query,
-                query_type=query_type,
-                answer="No relevant information found in the technical documents.",
-                certified_claims=[],
-                metadata={}
-            )
+            pack.answer = "No relevant text information found in the identified evidence regions."
+            return
 
-        # Use LLM to generate answer and extract claims
         llm_result = self.llm_answerer.generate_answer_with_claims(
-            query=query,
-            evidences=evidences[:20],
+            query=pack.query,
+            evidences=pack.evidences,
             evidence_texts=evidence_texts,
-            query_type=query_type
+            query_type="general" 
         )
 
-        answer = llm_result.get("answer", "")
+        pack.answer = llm_result.get("answer", "")
         claims_data = llm_result.get("claims", [])
-
-        # Map claims to CertifiedClaim objects
-        certified_claims = self.llm_answerer.map_claims_to_evidences(
-            claims_data=claims_data,
-            evidences=evidences[:20]
-        )
-
-        return QueryResult(
-            query=query,
-            query_type=query_type,
-            answer=answer,
-            certified_claims=certified_claims,
-            metadata={}
-        )
-
-    def _extract_claims_simple(
-        self,
-        evidences: List[RegionEvidence]
-    ) -> List[CertifiedClaim]:
-        """
-        Simple claim extraction (placeholder for LLM-based).
-
-        Args:
-            evidences: List of evidences
-
-        Returns:
-            List of certified claims
-        """
-        claims = []
-
-        # Group evidences by page
-        page_groups: Dict[str, List[RegionEvidence]] = {}
-        for ev in evidences[:5]:  # Top 5
-            if ev.page_id not in page_groups:
-                page_groups[ev.page_id] = []
-            page_groups[ev.page_id].append(ev)
-
-        # Create one claim per page group
-        for page_id, page_evidences in page_groups.items():
-            obj = self.spatial_index.get_object(page_evidences[0].object_id)
-            if not obj or not obj.text:
-                continue
-
-            claim = Claim(
-                text=obj.text[:200],  # Truncate
-                value=None,
-                entity_id=None,
-                claim_type="general"
-            )
-
-            certified_claim = CertifiedClaim(
-                claim=claim,
-                evidences=page_evidences,
-                confidence=page_evidences[0].score,
-                reasoning=f"Found in page {page_id}"
-            )
-
-            claims.append(certified_claim)
-
-        return claims
+        pack.certified_claims = self.llm_answerer.map_claims_to_evidences(claims_data, pack.evidences)

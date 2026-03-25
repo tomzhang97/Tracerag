@@ -11,7 +11,7 @@ import pickle
 import json
 from loguru import logger
 
-from tracerag.common.utils import load_config, setup_logging
+from tracerag.common.config import load_config, setup_logging
 from tracerag.retrieval.pipeline import TraceRAGSystem, PatchGridStore
 from tracerag.visual.encoder import VisualPageEncoder
 
@@ -20,7 +20,7 @@ app = typer.Typer()
 
 
 @app.command()
-def main(
+def search(
     index_root: str = typer.Option(..., help="Index root directory"),
     config_path: str = typer.Option(None, help="Path to config file (optional)"),
     query: str = typer.Option(None, help="Query string (if None, interactive mode)"),
@@ -56,9 +56,12 @@ def main(
             stlg = pickle.load(f)
         logger.info("✓ STLG loaded")
 
-    # Load spatial index (from first document for demo)
+    # Load and merge ALL spatial indexes (not just first one)
     struct_dir = index_root / "structural"
-    spatial_index = None
+    from tracerag.structural.parser import PdfSpatialIndex
+    combined_spatial_index = PdfSpatialIndex()
+    spatial_index_count = 0
+    
     for doc_dir in struct_dir.iterdir():
         if not doc_dir.is_dir():
             continue
@@ -68,15 +71,19 @@ def main(
             spatial_index_file = version_dir / "spatial_index.pkl"
             if spatial_index_file.exists():
                 with open(spatial_index_file, 'rb') as f:
-                    spatial_index = pickle.load(f)
-                logger.info(f"✓ Spatial index loaded from {version_dir}")
-                break
-        if spatial_index:
-            break
+                    si = pickle.load(f)
+                # Merge objects and indexes into combined index
+                for obj_id, obj in si.objects.items():
+                    combined_spatial_index.add_object(obj)
+                spatial_index_count += 1
+                logger.debug(f"Merged spatial index from {version_dir}")
 
-    if spatial_index is None:
+    if spatial_index_count == 0:
         logger.error("No spatial index found")
         return
+    
+    logger.info(f"✓ Merged {spatial_index_count} spatial indexes ({len(combined_spatial_index.objects)} objects)")
+    spatial_index = combined_spatial_index
 
     # Load patch grids
     visual_dir = index_root / "visual"
@@ -159,5 +166,8 @@ def print_result(result):
     print("\n" + "=" * 50 + "\n")
 
 
+def main():
+    typer.run(search)
+
 if __name__ == "__main__":
-    app()
+    main()

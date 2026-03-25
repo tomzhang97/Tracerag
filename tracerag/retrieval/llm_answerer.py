@@ -40,37 +40,53 @@ class LLMAnswerer:
         Supports:
         - OpenAI (gpt-4, gpt-3.5-turbo)
         - Anthropic (claude-*)
+        - Qianfan / Baidu ERNIE (ernie-*, via OpenAI-compatible endpoint)
+        - GLM / Zhipu AI (glm-*, chatglm-*, via OpenAI-compatible endpoint)
         - Local models via vLLM/Ollama (any model with base_url)
         """
-        # Check if local LLM endpoint is configured
         base_url = self.config.get("base_url") or self.config.get("llm_base_url")
         api_key = self.config.get("api_key") or self.config.get("llm_api_key", "EMPTY")
+        provider = self.config.get("provider", "auto")
 
-        # Local LLM (vLLM/Ollama) - identified by base_url
-        if base_url:
+        # Auto-detect provider from model name if not explicitly set
+        if provider == "auto":
+            mn = self.model_name.lower()
+            if "gpt" in mn or "openai" in mn:
+                provider = "openai"
+            elif "claude" in mn:
+                provider = "anthropic"
+            elif "ernie" in mn or "qianfan" in mn or "qwen" in mn or "glm" in mn or "chatglm" in mn or "zhipu" in mn:
+                provider = "qianfan"
+                if not base_url:
+                    base_url = "https://qianfan.baidubce.com/v2"
+            elif base_url:
+                provider = "openai_compatible"
+            else:
+                provider = "mock"
+
+        self._provider = provider
+
+        # All OpenAI-compatible providers (OpenAI, Qianfan, GLM, vLLM, Ollama)
+        if provider in ("openai", "qianfan", "glm", "openai_compatible"):
             try:
                 from openai import OpenAI
-                logger.info(f"Connecting to local LLM at {base_url}")
-                return OpenAI(
-                    api_key=api_key,  # Often "EMPTY" for vLLM, "ollama" for Ollama
-                    base_url=base_url
-                )
+                # Strip common suffix if user provided full endpoint
+                if base_url:
+                    base_url = base_url.rstrip("/")
+                    if base_url.endswith("/chat/completions"):
+                        base_url = base_url.replace("/chat/completions", "")
+                
+                client_kwargs = {"api_key": api_key if api_key != "EMPTY" else None}
+                if base_url:
+                    client_kwargs["base_url"] = base_url
+                logger.info(f"Initialized {provider} LLM client: {self.model_name} (base_url={base_url or 'default'})")
+                return OpenAI(**client_kwargs)
             except ImportError:
-                logger.error("OpenAI library required for local LLM. Install: pip install openai")
+                logger.error("OpenAI library required. Install: pip install openai")
                 return None
 
-        # OpenAI hosted models
-        if "gpt" in self.model_name or "openai" in self.model_name:
-            try:
-                from openai import OpenAI
-                logger.info(f"Using OpenAI model: {self.model_name}")
-                return OpenAI(api_key=api_key if api_key != "EMPTY" else None)
-            except ImportError:
-                logger.warning("OpenAI client not available, using mock")
-                return None
-
-        # Anthropic models
-        elif "claude" in self.model_name:
+        # Anthropic
+        elif provider == "anthropic":
             try:
                 from anthropic import Anthropic
                 logger.info(f"Using Anthropic model: {self.model_name}")
@@ -79,9 +95,8 @@ class LLMAnswerer:
                 logger.warning("Anthropic client not available, using mock")
                 return None
 
-        # Fallback to mock
         else:
-            logger.warning(f"Unknown model type '{self.model_name}', using mock LLM client")
+            logger.warning(f"Unknown provider '{provider}', using mock LLM client")
             return None
 
     def generate_answer_with_claims(
@@ -141,7 +156,7 @@ class LLMAnswerer:
         """
         # Create evidence snippets with IDs
         evidence_snippets = []
-        for i, ev in enumerate(evidences[:20], 1):  # Limit to 20 evidences
+        for i, ev in enumerate(evidences[:50], 1):  # Limit to 50 evidences to support long lists
             ev_id = f"E{i}"
             text = evidence_texts.get(ev.object_id, "")
 
@@ -183,6 +198,14 @@ Important:
 - Keep answer concise and technical
 - Maximum {self.max_claims} claims
 
+Critical - Aggregation and Arithmetic:
+- Use the summary total (e.g., "合计", "总重") as the primary authoritative value if it exists.
+- Perform a cross-check/validation: identify individual line items (e.g., weights for each box) and verify if their sum matches the summary total.
+- If they match exactly, please confirm this verification in your answer.
+- If they DO NOT match, look for reasons given in the text (e.g., "missing data", "not yet weighed", "shipment delayed").
+- In case of a discrepancy with no explanation, provide the summary total as the official value but note that the sum of listed items differs.
+- If some items are cut off (not in the evidence) but a summary page is present, rely on the summary page as the official total.
+
 JSON Response:"""
 
         return prompt
@@ -198,24 +221,10 @@ JSON Response:"""
             LLM response text
         """
         if self.client is None:
-            # Mock response for development
             return self._mock_response()
 
         try:
-            if "gpt" in self.model_name:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": "You are a technical documentation assistant."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    response_format={"type": "json_object"}
-                )
-                return response.choices[0].message.content
-
-            elif "claude" in self.model_name:
+            if self._provider == "anthropic":
                 response = self.client.messages.create(
                     model=self.model_name,
                     max_tokens=self.max_tokens,
@@ -225,9 +234,23 @@ JSON Response:"""
                     ]
                 )
                 return response.content[0].text
-
             else:
-                return self._mock_response()
+                # OpenAI-compatible path (OpenAI, Qianfan, GLM, vLLM, Ollama)
+                kwargs = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": "You are a technical documentation assistant."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                }
+                # Only request JSON format for models that support it
+                if self._provider == "openai" and "gpt" in self.model_name.lower():
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                response = self.client.chat.completions.create(**kwargs)
+                return response.choices[0].message.content
 
         except Exception as e:
             logger.error(f"LLM call failed: {e}")

@@ -17,7 +17,7 @@ from loguru import logger
 from dataclasses import dataclass
 
 from tracerag.common.types import RegionEvidence, QueryResult
-from tracerag.common.utils import bbox_iou
+from tracerag.common.geometry import bbox_iou
 from tracerag.eval.metrics import precision_at_k, recall_at_k, bbox_iou_score
 
 

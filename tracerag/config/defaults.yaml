@@ -1,19 +1,19 @@
 # TraceRAG Default Configuration
 
 # Data paths
-data_root: "/data/tracerag"
+data_root: "./data"
 pdf_root: "${data_root}/pdfs"
 index_root: "${data_root}/index"
 cache_root: "${data_root}/cache"
 
 # Visual encoding settings
 visual:
-  model_name: "vidore/colpali-v1.2"  # ColPali model
+  model_name: "vidore/colpali-v1.2-merged"  # ColPali model (merged weights)
   patch_H: 32
   patch_W: 32
   dpi: 300
   max_image_size: 1024
-  device: "cuda"  # cuda or cpu
+  device: "auto"  # auto (detect GPU), cuda, or cpu
   batch_size: 4
 
 # Structural parsing settings
@@ -69,20 +69,39 @@ graph:
 
 # LLM settings for answer generation
 llm:
-  # OpenAI (hosted)
-  model_name: "gpt-4-turbo"
-  # api_key: "sk-..."  # Set via OPENAI_API_KEY environment variable
+  # Provider auto-detection: set "provider" explicitly, or leave as "auto"
+  # to detect from model_name. Options: openai, anthropic, qianfan, glm, qwen, openai_compatible, auto
+  provider: "auto"
 
-  # OR Anthropic (hosted)
+  # --- Option 1: OpenAI ---
+  # model_name: "gpt-4o"
+  # api_key: "${OPENAI_API_KEY}"
+
+  # --- Option 2: Qianfan / Baidu ERNIE ---
+  # model_name: "ernie-4.0-8k"
+  # api_key: "${QIANFAN_API_KEY}"
+  # base_url: "https://qianfan.baidubce.com/v2/chat/completions"
+
+  # --- Option 3: GLM / Zhipu AI ---
+  # model_name: "glm-4-flash"
+  # api_key: "${GLM_API_KEY}"
+  # base_url: "https://qianfan.baidubce.com/v2/chat/completions"
+
+  # --- Option 4: Qwen / Alibaba ---
+  model_name: "qwen-max"
+  api_key: "${QWEN_API_KEY}"
+  base_url: "https://qianfan.baidubce.com/v2/chat/completions"
+
+  # --- Option 4: Anthropic ---
   # model_name: "claude-3-sonnet-20240229"
-  # api_key: "..."  # Set via ANTHROPIC_API_KEY environment variable
+  # api_key: "${ANTHROPIC_API_KEY}"
 
-  # OR Local LLM via vLLM
+  # --- Option 5: Local LLM via vLLM ---
   # model_name: "meta-llama/Meta-Llama-3-8B-Instruct"
   # base_url: "http://localhost:8000/v1"
   # api_key: "EMPTY"
 
-  # OR Local LLM via Ollama
+  # --- Option 6: Local LLM via Ollama ---
   # model_name: "llama3"
   # base_url: "http://localhost:11434/v1"
   # api_key: "ollama"
@@ -102,6 +121,8 @@ query_classifier:
     - "procedural"
     - "revision"
     - "diff"
+    - "set_query"
+    - "aggregation_query"
 
 # Logging
 logging:

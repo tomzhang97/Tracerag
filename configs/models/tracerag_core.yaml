@@ -1,0 +1,12 @@
+name: tracerag_core
+retrieval:
+  use_snapper: true
+visual:
+  enabled: true
+  model_name: vidore/colpali-v1.2
+structural:
+  enabled: true
+revision:
+  enabled: true
+llm:
+  enabled: false

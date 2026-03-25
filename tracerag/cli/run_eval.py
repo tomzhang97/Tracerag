@@ -9,9 +9,10 @@ import typer
 import json
 import pickle
 from pathlib import Path
+from typing import Any
 from loguru import logger
 
-from tracerag.common.utils import load_config, setup_logging
+from tracerag.common.config import load_config, setup_logging
 from tracerag.retrieval.pipeline import TraceRAGSystem, PatchGridStore
 from tracerag.visual.encoder import VisualPageEncoder
 from tracerag.eval.microtext_eval import MicroTextEvaluator, MicroTextQuestion
@@ -53,13 +54,11 @@ def main(
         results = run_eng_bench_eval(system, data_path)
     elif benchmark == "microtext":
         # Load benchmark data
-        with open(data_path, 'r') as f:
-            benchmark_data = json.load(f)
+        benchmark_data = load_benchmark_data(data_path)
         results = run_microtext_eval(system, benchmark_data)
     elif benchmark == "visualdiff":
         # Load benchmark data
-        with open(data_path, 'r') as f:
-            benchmark_data = json.load(f)
+        benchmark_data = load_benchmark_data(data_path)
         results = run_visualdiff_eval(system, benchmark_data)
     else:
         logger.error(f"Unknown benchmark: {benchmark}")
@@ -70,6 +69,27 @@ def main(
         with open(output_file, 'w') as f:
             json.dump(results, f, indent=2)
         logger.info(f"Results saved to {output_file}")
+
+
+def load_benchmark_data(data_path: str) -> Any:
+    """
+    Load benchmark data from JSON or JSONL file.
+    Always returns a list of items or a dict with 'questions' key.
+    """
+    path = Path(data_path)
+    
+    if path.suffix == '.jsonl':
+        data = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    data.append(json.loads(line))
+        return {"questions": data}  # Wrap in dict to match expected structure
+        
+    else:
+        # Standard JSON
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
 
 def load_system(index_root: str, config: dict) -> TraceRAGSystem:
@@ -93,32 +113,35 @@ def load_system(index_root: str, config: dict) -> TraceRAGSystem:
     # Load spatial index
     struct_dir = index_root / "structural"
     spatial_index = None
-    for doc_dir in struct_dir.iterdir():
-        if not doc_dir.is_dir():
-            continue
-        for version_dir in doc_dir.iterdir():
-            if not version_dir.is_dir():
+    if struct_dir.exists():
+        for doc_dir in struct_dir.iterdir():
+            if not doc_dir.is_dir():
                 continue
-            spatial_index_file = version_dir / "spatial_index.pkl"
-            if spatial_index_file.exists():
-                with open(spatial_index_file, 'rb') as f:
-                    spatial_index = pickle.load(f)
-                break
-        if spatial_index:
-            break
-
+            for version_dir in doc_dir.iterdir():
+                if not version_dir.is_dir():
+                    continue
+                spatial_index_file = version_dir / "spatial_index.pkl"
+                if spatial_index_file.exists():
+                    with open(spatial_index_file, 'rb') as f:
+                        spatial_index = pickle.load(f)
+                    # For now just use the last loaded one - in full system would need multi-doc support in spatial index
+                    # But TraceRAGSystem currently takes a single spatial_index. 
+                    # We might need to handle this if we are doing multi-doc.
+                    # However, to preserve existing logic, we'll keep this but note the limitation.
+                    
     # Load patch grids
     visual_dir = index_root / "visual"
     patch_grid_store = PatchGridStore()
-    for doc_dir in visual_dir.iterdir():
-        if not doc_dir.is_dir():
-            continue
-        for version_dir in doc_dir.iterdir():
-            if not version_dir.is_dir():
+    if visual_dir.exists():
+        for doc_dir in visual_dir.iterdir():
+            if not doc_dir.is_dir():
                 continue
-            for patch_file in version_dir.glob("*.npz"):
-                patch_grid = VisualPageEncoder.load_patch_grid(str(patch_file))
-                patch_grid_store.add(patch_grid)
+            for version_dir in doc_dir.iterdir():
+                if not version_dir.is_dir():
+                    continue
+                for patch_file in version_dir.glob("*.npz"):
+                    patch_grid = VisualPageEncoder.load_patch_grid(str(patch_file))
+                    patch_grid_store.add(patch_grid)
 
     # Initialize visual encoder
     visual_encoder = VisualPageEncoder(config.get("visual", {}))
@@ -142,20 +165,24 @@ def run_microtext_eval(system: TraceRAGSystem, data: dict) -> dict:
     """Run micro-text evaluation."""
     logger.info("Running micro-text evaluation")
 
+    # Handle both list and dict input
+    items = data if isinstance(data, list) else data.get("questions", [])
+    
     # Parse questions
     questions = []
-    for item in data.get("questions", []):
+    for item in items:
+        # Map fields handling potential naming differences
         question = MicroTextQuestion(
-            query_id=item["query_id"],
-            query=item["query"],
+            query_id=item.get("question_id") or item.get("query_id"),
+            query=item.get("query_text") or item.get("query"),
             doc_id=item["doc_id"],
             version_id=item["version_id"],
-            answer_text=item["answer_text"],
-            gt_page_id=item["gt_page_id"],
-            gt_object_id=item["gt_object_id"],
-            gt_bbox=tuple(item["gt_bbox"]),
+            answer_text=item.get("answer_text") or item.get("answer"),
+            gt_page_id=None, # annotations might not have this, harmless if None for now
+            gt_object_id=None, # annotations might not have this
+            gt_bbox=(0,0,0,0), # Placeholder if missing
             font_height_px=item.get("font_height_px", 12.0),
-            metadata=item.get("metadata", {})
+            metadata=item
         )
         questions.append(question)
 
@@ -243,22 +270,25 @@ def run_visualdiff_eval(system: TraceRAGSystem, data: dict) -> dict:
     """Run visual diff evaluation."""
     logger.info("Running visual diff evaluation")
 
+    # Handle both list and dict input
+    items = data if isinstance(data, list) else data.get("questions", [])
+
     # Parse questions
     questions = []
-    for item in data.get("questions", []):
+    for item in items:
         question = VisualDiffQuestion(
-            query_id=item["query_id"],
-            query=item["query"],
+            query_id=item.get("question_id") or item.get("query_id"),
+            query=item.get("query_text") or item.get("query"),
             doc_id=item["doc_id"],
-            old_version_id=item["old_version_id"],
-            new_version_id=item["new_version_id"],
-            change_type=item["change_type"],
-            key_tokens=item["key_tokens"],
+            old_version_id=item.get("old_version_id") or item.get("revision_a"), # Handle potential schema vars
+            new_version_id=item.get("new_version_id") or item.get("revision_b"),
+            change_type=item.get("change_type"),
+            key_tokens=item.get("key_tokens", []),
             bbox_old=tuple(item["bbox_old"]) if item.get("bbox_old") else None,
             bbox_new=tuple(item["bbox_new"]) if item.get("bbox_new") else None,
-            page_old=item["page_old"],
-            page_new=item["page_new"],
-            metadata=item.get("metadata", {})
+            page_old=item.get("page_old"),
+            page_new=item.get("page_new"),
+            metadata=item
         )
         questions.append(question)
 

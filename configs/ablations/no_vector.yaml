@@ -1,0 +1,4 @@
+name: tracerag_no_vector
+base_model: tracerag_full
+ablations:
+- no_vector
