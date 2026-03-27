@@ -6,13 +6,22 @@ Key metrics:
 - Recall@K: Fraction of relevant items that are retrieved
 - BBox IoU: For spatial grounding accuracy
 - Vector-Native Accuracy: Fraction of evidences that snap to correct objects
+- Route summaries: Grouped answer/evidence failure analysis by retrieval route
 """
 
-from typing import List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 import numpy as np
 
 from tracerag.common.types import BBox, RegionEvidence
 from tracerag.common.geometry import bbox_iou
+
+
+ROUTE_LABELS = {
+    "standard_qa": "exact_attribute_qa",
+    "object_aggregation": "object_list_aggregation",
+    "document_aggregation": "document_list_aggregation",
+    "revision_aware_qa": "revision_aware_qa",
+}
 
 
 def precision_at_k(retrieved: List[str], relevant: Set[str], k: int) -> float:
@@ -200,3 +209,36 @@ def ndcg_at_k(retrieved: List[str], relevant: Set[str], k: int) -> float:
         return 0.0
 
     return dcg / idcg
+
+
+def _mean_rate(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    return float(np.mean(values))
+
+
+def canonical_route_name(route_name: str | None, fallback: str = "unknown") -> str:
+    if not route_name:
+        return fallback
+    return ROUTE_LABELS.get(route_name, route_name)
+
+
+def summarize_route_metrics(results: List[Dict[str, Any]], route_key: str = "route_name") -> Dict[str, Dict[str, float]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for result in results:
+        route_name = canonical_route_name(result.get(route_key), fallback=result.get("query_type", "unknown"))
+        grouped.setdefault(route_name, []).append(result)
+
+    summary: Dict[str, Dict[str, float]] = {}
+    for route_name, route_results in grouped.items():
+        summary[route_name] = {
+            "count": len(route_results),
+            "answer_accuracy": _mean_rate([1.0 if item.get("answer_correct") else 0.0 for item in route_results]),
+            "evidence_correctness": _mean_rate([1.0 if item.get("evidence_correct") else 0.0 for item in route_results]),
+            "wrong_value_rate": _mean_rate([1.0 if item.get("wrong_value") else 0.0 for item in route_results]),
+            "wrong_scope_rate": _mean_rate([1.0 if item.get("wrong_scope") else 0.0 for item in route_results]),
+            "contradiction_failure_rate": _mean_rate(
+                [1.0 if item.get("contradiction_failure") else 0.0 for item in route_results]
+            ),
+        }
+    return summary

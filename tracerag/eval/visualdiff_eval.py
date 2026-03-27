@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from tracerag.common.types import RegionEvidence, QueryResult
 from tracerag.common.geometry import bbox_iou
+from tracerag.eval.metrics import summarize_route_metrics
 
 
 @dataclass
@@ -68,6 +69,9 @@ class VisualDiffEvaluator:
         """
         # Run query
         result = self.system.answer(question.query)
+        route_name = result.metadata.get("route_name", "revision_aware_qa")
+        top_candidate_traces = result.metadata.get("top_candidate_traces", [])
+        trace_summary = result.metadata.get("trace_summary", {})
 
         # Collect evidences from both versions
         evidences_old = []
@@ -118,9 +122,20 @@ class VisualDiffEvaluator:
             question.bbox_new
         ) if question.bbox_new else None
 
+        evidence_correct = self._is_evidence_correct(question, spatial_grounding_old, spatial_grounding_new)
+        wrong_value = evidence_correct and (keyword_recall < 1.0 or not change_detected)
+        wrong_scope = (has_evidence_old or has_evidence_new) and not evidence_correct
+        contradiction_failure = (
+            float(trace_summary.get("max_contradiction_penalty", 0.0) or 0.0) >= 0.18
+            and not change_detected
+        )
+
         return {
             "query_id": question.query_id,
+            "route_name": route_name,
+            "query_type": "revision_aware_qa",
             "change_type": question.change_type,
+            "answer_correct": change_detected,
             "change_detected": change_detected,
             "has_evidence_old": has_evidence_old,
             "has_evidence_new": has_evidence_new,
@@ -129,6 +144,12 @@ class VisualDiffEvaluator:
             "keywords_missing": keywords_missing,
             "spatial_grounding_old": spatial_grounding_old,
             "spatial_grounding_new": spatial_grounding_new,
+            "evidence_correct": evidence_correct,
+            "wrong_value": wrong_value,
+            "wrong_scope": wrong_scope,
+            "contradiction_failure": contradiction_failure,
+            "top_candidate_traces": top_candidate_traces,
+            "trace_summary": trace_summary,
             "num_claims": len(result.certified_claims),
         }
 
@@ -188,6 +209,23 @@ class VisualDiffEvaluator:
             "iou_pass": best_iou >= self.iou_threshold,
         }
 
+    def _is_evidence_correct(
+        self,
+        question: VisualDiffQuestion,
+        spatial_grounding_old: Dict[str, Any] | None,
+        spatial_grounding_new: Dict[str, Any] | None,
+    ) -> bool:
+        if question.change_type == "added":
+            return bool(spatial_grounding_new and spatial_grounding_new["iou_pass"])
+        if question.change_type == "removed":
+            return bool(spatial_grounding_old and spatial_grounding_old["iou_pass"])
+        return bool(
+            spatial_grounding_old
+            and spatial_grounding_new
+            and spatial_grounding_old["iou_pass"]
+            and spatial_grounding_new["iou_pass"]
+        )
+
     def _aggregate_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Aggregate evaluation results.
@@ -230,6 +268,7 @@ class VisualDiffEvaluator:
                 "mean_spatial_iou_old": mean_spatial_iou_old,
                 "mean_spatial_iou_new": mean_spatial_iou_new,
             },
+            "by_route": summarize_route_metrics(results),
             "by_change_type": change_type_metrics,
             "per_question": results,
         }
@@ -285,6 +324,15 @@ class VisualDiffEvaluator:
         print(f"  Mean Keyword Recall:     {overall['mean_keyword_recall']:.3f}")
         print(f"  Mean Spatial IoU (Old):  {overall['mean_spatial_iou_old']:.3f}")
         print(f"  Mean Spatial IoU (New):  {overall['mean_spatial_iou_new']:.3f}")
+
+        print("\nPerformance by Route:")
+        for route_name, metrics in aggregated.get("by_route", {}).items():
+            print(f"  {route_name} (N={metrics['count']}):")
+            print(f"    Answer Accuracy:         {metrics['answer_accuracy']:.3f}")
+            print(f"    Evidence Correctness:    {metrics['evidence_correctness']:.3f}")
+            print(f"    Wrong Value Rate:        {metrics['wrong_value_rate']:.3f}")
+            print(f"    Wrong Scope Rate:        {metrics['wrong_scope_rate']:.3f}")
+            print(f"    Contradiction Fail Rate: {metrics['contradiction_failure_rate']:.3f}")
 
         print("\nPerformance by Change Type:")
         for change_type, metrics in aggregated["by_change_type"].items():

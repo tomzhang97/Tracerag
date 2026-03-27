@@ -1,23 +1,28 @@
 """
 CLI tool for running TraceRAG evaluation benchmarks.
-
-Usage:
-    tracerag-eval --benchmark microtext --index_root /data/tracerag/index --data_path /path/to/benchmark.json
 """
 
-import typer
+from __future__ import annotations
+
 import json
 import pickle
 from pathlib import Path
 from typing import Any
+
+import typer
 from loguru import logger
 
 from tracerag.common.config import load_config, setup_logging
-from tracerag.retrieval.pipeline import TraceRAGSystem, PatchGridStore
-from tracerag.visual.encoder import VisualPageEncoder
+from tracerag.eval.docvqa_eval import DocVQAEvaluator, load_docvqa_questions
+from tracerag.eval.loader import EngBenchLoader
 from tracerag.eval.microtext_eval import MicroTextEvaluator, MicroTextQuestion
 from tracerag.eval.visualdiff_eval import VisualDiffEvaluator, VisualDiffQuestion
-from tracerag.eval.eng_bench_loader import EngBenchLoader
+from tracerag.retrieval.candidate_filter import CandidateFilter
+from tracerag.retrieval.llm_answerer import LLMAnswerer
+from tracerag.retrieval.pipeline import PatchGridStore, TraceRAGSystem
+from tracerag.structural.index import PdfSpatialIndex
+from tracerag.visual.encoder import VisualPageEncoder
+from tracerag.visual.scorer import VisualScorer
 
 
 app = typer.Typer()
@@ -25,226 +30,169 @@ app = typer.Typer()
 
 @app.command()
 def main(
-    benchmark: str = typer.Option("microtext", help="Benchmark name (eng_bench, microtext, or visualdiff)"),
+    benchmark: str = typer.Option("microtext", help="Benchmark name (eng_bench, microtext, visualdiff, or docvqa)"),
     index_root: str = typer.Option(..., help="Index root directory"),
-    data_path: str = typer.Option(..., help="Path to benchmark data file (JSON)"),
+    data_path: str = typer.Option(..., help="Path to benchmark data file (JSON or JSONL)"),
     config_path: str = typer.Option(None, help="Path to config file (optional)"),
     output_file: str = typer.Option(None, help="Output file for results (JSON)"),
 ):
-    """
-    Run evaluation benchmarks.
-
-    Benchmarks:
-    - eng_bench: General engineering QA benchmark
-    - microtext: Micro-text extraction accuracy
-    - visualdiff: Visual diff detection across versions
-    """
-    # Load config
     config = load_config(config_path)
     setup_logging(config)
 
     logger.info(f"Running benchmark: {benchmark}")
     logger.info(f"Data path: {data_path}")
 
-    # Load TraceRAG system
     system = load_system(index_root, config)
+    benchmark_data = load_benchmark_data(data_path)
 
-    # Run appropriate benchmark
     if benchmark == "eng_bench":
         results = run_eng_bench_eval(system, data_path)
     elif benchmark == "microtext":
-        # Load benchmark data
-        benchmark_data = load_benchmark_data(data_path)
         results = run_microtext_eval(system, benchmark_data)
     elif benchmark == "visualdiff":
-        # Load benchmark data
-        benchmark_data = load_benchmark_data(data_path)
         results = run_visualdiff_eval(system, benchmark_data)
+    elif benchmark == "docvqa":
+        results = run_docvqa_eval(system, benchmark_data)
     else:
         logger.error(f"Unknown benchmark: {benchmark}")
-        return
+        raise typer.Exit(code=1)
 
-    # Save results
     if output_file:
-        with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
         logger.info(f"Results saved to {output_file}")
 
 
 def load_benchmark_data(data_path: str) -> Any:
-    """
-    Load benchmark data from JSON or JSONL file.
-    Always returns a list of items or a dict with 'questions' key.
-    """
     path = Path(data_path)
-    
-    if path.suffix == '.jsonl':
-        data = []
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    data.append(json.loads(line))
-        return {"questions": data}  # Wrap in dict to match expected structure
-        
-    else:
-        # Standard JSON
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+    with open(path, "r", encoding="utf-8") as f:
+        if path.suffix.lower() == ".jsonl":
+            return {"questions": [json.loads(line) for line in f if line.strip()]}
+        return json.load(f)
 
 
 def load_system(index_root: str, config: dict) -> TraceRAGSystem:
-    """Load TraceRAG system from index."""
-    index_root = Path(index_root)
+    index_root_path = Path(index_root)
+    logger.info(f"Loading TraceRAG system from {index_root_path}")
 
-    logger.info("Loading indexes...")
-
-    # Load text index
-    text_index_file = index_root / "text_index.pkl"
-    with open(text_index_file, 'rb') as f:
+    text_index_file = index_root_path / "text_index.pkl"
+    if not text_index_file.exists():
+        raise FileNotFoundError(f"Text index not found: {text_index_file}")
+    with open(text_index_file, "rb") as f:
         text_index = pickle.load(f)
 
-    # Load STLG
-    stlg_file = index_root / "stlg.pkl"
-    stlg = None
-    if stlg_file.exists():
-        with open(stlg_file, 'rb') as f:
-            stlg = pickle.load(f)
+    struct_root = index_root_path / "structural"
+    if not struct_root.exists():
+        raise FileNotFoundError(f"Structural directory not found: {struct_root}")
 
-    # Load spatial index
-    struct_dir = index_root / "structural"
-    spatial_index = None
-    if struct_dir.exists():
-        for doc_dir in struct_dir.iterdir():
-            if not doc_dir.is_dir():
-                continue
-            for version_dir in doc_dir.iterdir():
-                if not version_dir.is_dir():
-                    continue
-                spatial_index_file = version_dir / "spatial_index.pkl"
-                if spatial_index_file.exists():
-                    with open(spatial_index_file, 'rb') as f:
-                        spatial_index = pickle.load(f)
-                    # For now just use the last loaded one - in full system would need multi-doc support in spatial index
-                    # But TraceRAGSystem currently takes a single spatial_index. 
-                    # We might need to handle this if we are doing multi-doc.
-                    # However, to preserve existing logic, we'll keep this but note the limitation.
-                    
-    # Load patch grids
-    visual_dir = index_root / "visual"
+    spatial_index = PdfSpatialIndex()
+    merged_indexes = 0
+    for spatial_index_file in struct_root.rglob("spatial_index.pkl"):
+        with open(spatial_index_file, "rb") as f:
+            loaded_index = pickle.load(f)
+        for obj in loaded_index.objects.values():
+            spatial_index.add_object(obj)
+        merged_indexes += 1
+    logger.info(f"Merged {merged_indexes} spatial indexes ({len(spatial_index.objects)} objects)")
+
     patch_grid_store = PatchGridStore()
-    if visual_dir.exists():
-        for doc_dir in visual_dir.iterdir():
-            if not doc_dir.is_dir():
-                continue
-            for version_dir in doc_dir.iterdir():
-                if not version_dir.is_dir():
-                    continue
-                for patch_file in version_dir.glob("*.npz"):
-                    patch_grid = VisualPageEncoder.load_patch_grid(str(patch_file))
-                    patch_grid_store.add(patch_grid)
+    visual_root = index_root_path / "visual"
+    if visual_root.exists():
+        for patch_file in visual_root.rglob("*.npz"):
+            patch_grid_store.add(VisualPageEncoder.load_patch_grid(str(patch_file)))
+    logger.info(f"Loaded {len(patch_grid_store.grids)} patch grids")
 
-    # Initialize visual encoder
+    candidate_filter = CandidateFilter(text_index, config.get("retrieval", {}))
     visual_encoder = VisualPageEncoder(config.get("visual", {}))
+    visual_scorer = VisualScorer(config.get("visual", {}), encoder=visual_encoder)
+    llm_answerer = LLMAnswerer(config.get("llm", {}))
 
-    # Create system
+    manifest = {}
+    manifest_path = index_root_path / "manifest.json"
+    if manifest_path.exists():
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
     system = TraceRAGSystem(
         config=config,
-        text_index=text_index,
+        candidate_filter=candidate_filter,
         patch_grid_store=patch_grid_store,
         spatial_index=spatial_index,
-        visual_encoder=visual_encoder,
-        stlg=stlg,
-        ldg=None,
+        visual_scorer=visual_scorer,
+        llm_answerer=llm_answerer,
+        manifest=manifest,
     )
-
     logger.info("System loaded successfully")
     return system
 
 
 def run_microtext_eval(system: TraceRAGSystem, data: dict) -> dict:
-    """Run micro-text evaluation."""
     logger.info("Running micro-text evaluation")
-
-    # Handle both list and dict input
     items = data if isinstance(data, list) else data.get("questions", [])
-    
-    # Parse questions
+
     questions = []
     for item in items:
-        # Map fields handling potential naming differences
-        question = MicroTextQuestion(
-            query_id=item.get("question_id") or item.get("query_id"),
-            query=item.get("query_text") or item.get("query"),
-            doc_id=item["doc_id"],
-            version_id=item["version_id"],
-            answer_text=item.get("answer_text") or item.get("answer"),
-            gt_page_id=None, # annotations might not have this, harmless if None for now
-            gt_object_id=None, # annotations might not have this
-            gt_bbox=(0,0,0,0), # Placeholder if missing
-            font_height_px=item.get("font_height_px", 12.0),
-            metadata=item
+        questions.append(
+            MicroTextQuestion(
+                query_id=item.get("question_id") or item.get("query_id"),
+                query=item.get("query_text") or item.get("query"),
+                doc_id=item["doc_id"],
+                version_id=item["version_id"],
+                answer_text=item.get("answer_text") or item.get("answer"),
+                gt_page_id=item.get("page_id"),
+                gt_object_id=item.get("object_id"),
+                gt_bbox=tuple(item.get("bbox") or (0, 0, 0, 0)),
+                font_height_px=item.get("font_height_px", 12.0),
+                metadata=item,
+            )
         )
-        questions.append(question)
 
-    # Run evaluation
     evaluator = MicroTextEvaluator(system)
     results = evaluator.evaluate_dataset(questions)
-
-    # Print summary
     evaluator.print_summary(results)
+    return results
 
+
+def run_docvqa_eval(system: TraceRAGSystem, data: dict) -> dict:
+    logger.info("Running DocVQA evaluation")
+    questions = load_docvqa_questions(data)
+    evaluator = DocVQAEvaluator(system)
+    results = evaluator.evaluate_dataset(questions)
+    evaluator.print_summary(results)
     return results
 
 
 def run_eng_bench_eval(system: TraceRAGSystem, data_path: str) -> dict:
-    """Run engineering benchmark evaluation."""
     logger.info("Running engineering benchmark evaluation")
-
-    # Load benchmark using robust loader
     loader = EngBenchLoader(data_path)
     queries = loader.load()
-
     if not queries:
         logger.error("No queries loaded from benchmark")
         return {}
 
-    # Run queries and collect results
     results = []
-    for i, query in enumerate(queries, 1):
-        logger.info(f"Processing query {i}/{len(queries)}: {query.query_id}")
-
+    for query in queries:
         try:
-            # Run query through TraceRAG
             result = system.answer(query.query_text)
+            predicted_answer = result.answer or ""
+            correct = query.ground_truth_answer.lower() in predicted_answer.lower() if query.ground_truth_answer else False
+            results.append(
+                {
+                    "query_id": query.query_id,
+                    "query": query.query_text,
+                    "predicted_answer": predicted_answer,
+                    "ground_truth": query.ground_truth_answer,
+                    "correct": correct,
+                    "route_name": result.metadata.get("route_name", query.query_type),
+                    "top_candidate_traces": result.metadata.get("top_candidate_traces", []),
+                }
+            )
+        except Exception as exc:
+            logger.error(f"Error processing query {query.query_id}: {exc}")
+            results.append({"query_id": query.query_id, "query": query.query_text, "error": str(exc)})
 
-            # Extract predicted answer
-            predicted_answer = result.answer
-
-            # Simple correctness check (would need more sophisticated matching in production)
-            correct = query.ground_truth_answer.lower() in predicted_answer.lower()
-
-            results.append({
-                "query_id": query.query_id,
-                "query": query.query_text,
-                "predicted_answer": predicted_answer,
-                "ground_truth": query.ground_truth_answer,
-                "correct": correct,
-                "num_claims": len(result.certified_claims),
-                "num_evidences": sum(len(c.evidences) for c in result.certified_claims),
-            })
-
-        except Exception as e:
-            logger.error(f"Error processing query {query.query_id}: {e}")
-            results.append({
-                "query_id": query.query_id,
-                "query": query.query_text,
-                "error": str(e),
-            })
-
-    # Compute aggregated metrics
-    valid_results = [r for r in results if "error" not in r]
-    accuracy = sum(r["correct"] for r in valid_results) / len(valid_results) if valid_results else 0.0
-
+    valid_results = [item for item in results if "error" not in item]
+    accuracy = sum(item["correct"] for item in valid_results) / len(valid_results) if valid_results else 0.0
     aggregated = {
         "total_queries": len(queries),
         "successful": len(valid_results),
@@ -253,7 +201,6 @@ def run_eng_bench_eval(system: TraceRAGSystem, data_path: str) -> dict:
         "per_query": results,
     }
 
-    # Print summary
     print("\n" + "=" * 60)
     print("ENGINEERING BENCHMARK RESULTS")
     print("=" * 60)
@@ -262,43 +209,35 @@ def run_eng_bench_eval(system: TraceRAGSystem, data_path: str) -> dict:
     print(f"Failed: {aggregated['failed']}")
     print(f"Accuracy: {aggregated['accuracy']:.3f}")
     print("=" * 60 + "\n")
-
     return aggregated
 
 
 def run_visualdiff_eval(system: TraceRAGSystem, data: dict) -> dict:
-    """Run visual diff evaluation."""
     logger.info("Running visual diff evaluation")
-
-    # Handle both list and dict input
     items = data if isinstance(data, list) else data.get("questions", [])
 
-    # Parse questions
     questions = []
     for item in items:
-        question = VisualDiffQuestion(
-            query_id=item.get("question_id") or item.get("query_id"),
-            query=item.get("query_text") or item.get("query"),
-            doc_id=item["doc_id"],
-            old_version_id=item.get("old_version_id") or item.get("revision_a"), # Handle potential schema vars
-            new_version_id=item.get("new_version_id") or item.get("revision_b"),
-            change_type=item.get("change_type"),
-            key_tokens=item.get("key_tokens", []),
-            bbox_old=tuple(item["bbox_old"]) if item.get("bbox_old") else None,
-            bbox_new=tuple(item["bbox_new"]) if item.get("bbox_new") else None,
-            page_old=item.get("page_old"),
-            page_new=item.get("page_new"),
-            metadata=item
+        questions.append(
+            VisualDiffQuestion(
+                query_id=item.get("question_id") or item.get("query_id"),
+                query=item.get("query_text") or item.get("query"),
+                doc_id=item["doc_id"],
+                old_version_id=item.get("old_version_id") or item.get("revision_a"),
+                new_version_id=item.get("new_version_id") or item.get("revision_b"),
+                change_type=item.get("change_type"),
+                key_tokens=item.get("key_tokens", []),
+                bbox_old=tuple(item["bbox_old"]) if item.get("bbox_old") else None,
+                bbox_new=tuple(item["bbox_new"]) if item.get("bbox_new") else None,
+                page_old=item.get("page_old"),
+                page_new=item.get("page_new"),
+                metadata=item,
+            )
         )
-        questions.append(question)
 
-    # Run evaluation
     evaluator = VisualDiffEvaluator(system)
     results = evaluator.evaluate_dataset(questions)
-
-    # Print summary
     evaluator.print_summary(results)
-
     return results
 
 

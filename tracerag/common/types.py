@@ -88,7 +88,21 @@ class RegionEvidence(TraceRAGBaseModel):
     bbox: BBox
     obj_type: str
     extraction_method: str
-    score: float
+    score: float  # Final weighted combination (computed last)
+    visual_score: float = 0.0     # Frozen after Snapper (Stage 3)
+    symbolic_bonus: float = 0.0   # Computed in Stage 3.5 (entity, attribute, coverage)
+    doc_prior: float = 0.0        # Computed in Stage 3.5 from manifest/folder context
+    entity_match: float = 0.0
+    attribute_match: float = 0.0
+    value_match: float = 0.0
+    local_structure_score: float = 0.0
+    scope_score: float = 0.0
+    normalized_value: str = ""
+    validator_confidence: float = 0.0
+    match_reason: str = ""
+    contradiction_penalty: float = 0.0
+    cluster_id: str = ""
+    trace: Dict[str, Any] = Field(default_factory=dict)
     hash: str = ""
 
 SnappedEvidence = RegionEvidence
@@ -154,4 +168,3 @@ class EvalResult(TraceRAGBaseModel):
     """Results of a benchmark evaluation run."""
     overall: Dict[str, Any]
     per_query: List[Dict[str, Any]]
-

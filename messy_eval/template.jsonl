@@ -1,0 +1,1 @@
+{"query": "What is the rope diameter?", "expected_answer": "10 mm", "expected_answer_type": "numeric_with_unit", "expected_evidence": {"doc_id": "example_doc", "page_id": "example_doc_v1_p0", "object_id": "obj_123", "cluster_id": "cluster_01"}, "route_type": "standard_qa", "failure_mode": "broken_table_layout"}

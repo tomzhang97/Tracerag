@@ -8,6 +8,7 @@ from loguru import logger
 import time
 
 from tracerag.eval.loader import EngBenchLoader
+from tracerag.eval.metrics import summarize_route_metrics
 from tracerag.eval.qa import QAEvaluator
 from tracerag.retrieval.pipeline import TraceRAGSystem
 from tracerag.common.types import EvalResult
@@ -97,6 +98,7 @@ class EvalRunner:
             "version_accuracy": sum(m.get("version_accuracy", 0.0) for m in all_metrics) / len(queries) if queries else 0,
             "change_class_accuracy": sum(m.get("change_class_accuracy", 0.0) for m in all_metrics) / len(queries) if queries else 0,
             "latency_ms_mean": (total_time / len(queries)) * 1000.0 if queries else 0,
+            "by_route": summarize_route_metrics(all_metrics),
             "storage_mb": 0.0,
             "manifest_path": ""
         }

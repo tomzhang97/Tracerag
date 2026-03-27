@@ -5,6 +5,7 @@ Evaluates the quality of TraceRAG's answers against ground truth data.
 
 from typing import Dict, Any, List
 from tracerag.common.types import BenchmarkExample
+from tracerag.eval.metrics import canonical_route_name
 from tracerag.retrieval.evidence_pack import EvidencePack
 
 def _token_f1(prediction: str, ground_truth: str) -> float:
@@ -45,12 +46,17 @@ class QAEvaluator:
         answer_text = result.answer or ""
         metrics = {
             "query_id": question.query_id,
+            "route_name": canonical_route_name(result.metadata.get("route_name"), fallback=question.query_type),
+            "query_type": question.query_type,
+            "top_candidate_traces": result.metadata.get("top_candidate_traces", []),
+            "trace_summary": result.metadata.get("trace_summary", {}),
         }
 
         # Answer metrics
         if question.ground_truth_answer:
             metrics["answer_f1"] = _token_f1(answer_text, question.ground_truth_answer)
             metrics["answer_em"] = 1.0 if answer_text.strip().lower() == question.ground_truth_answer.strip().lower() else 0.0
+            metrics["answer_correct"] = metrics["answer_em"] == 1.0
             
             # Subtask specific set metrics for Document Aggregation
             if question.query_type == "document_aggregation":
@@ -68,6 +74,7 @@ class QAEvaluator:
         else:
             metrics["answer_f1"] = 0.0
             metrics["answer_em"] = 0.0
+            metrics["answer_correct"] = False
             if question.query_type == "document_aggregation":
                 metrics["set_precision"] = 0.0
                 metrics["set_recall"] = 0.0
@@ -94,5 +101,12 @@ class QAEvaluator:
             metrics["evidence_precision"] = 0.0
             metrics["evidence_recall"] = 0.0
             metrics["evidence_correct"] = False
+
+        metrics["wrong_value"] = bool(metrics.get("evidence_correct")) and not bool(metrics.get("answer_correct"))
+        metrics["wrong_scope"] = bool(result.evidences) and not bool(metrics.get("evidence_correct"))
+        metrics["contradiction_failure"] = (
+            float(metrics["trace_summary"].get("max_contradiction_penalty", 0.0) or 0.0) >= 0.18
+            and not bool(metrics.get("answer_correct"))
+        )
 
         return metrics

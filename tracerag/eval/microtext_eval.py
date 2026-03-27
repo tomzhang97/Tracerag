@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from tracerag.common.types import RegionEvidence, QueryResult
 from tracerag.common.geometry import bbox_iou
-from tracerag.eval.metrics import precision_at_k, recall_at_k, bbox_iou_score
+from tracerag.eval.metrics import summarize_route_metrics
 
 
 @dataclass
@@ -68,6 +68,9 @@ class MicroTextEvaluator:
         """
         # Run query
         result = self.system.answer(question.query)
+        route_name = result.metadata.get("route_name", question.metadata.get("route_type", "standard_qa"))
+        top_candidate_traces = result.metadata.get("top_candidate_traces", [])
+        trace_summary = result.metadata.get("trace_summary", {})
 
         # Extract predicted answer
         # Look for extracted values in claims
@@ -118,12 +121,28 @@ class MicroTextEvaluator:
             evidence_results["object_id_match"] = False
             evidence_results["page_id_match"] = False
 
+        evidence_correct = evidence_results["object_id_match"] or evidence_results["iou_pass"]
+        wrong_value = bool(predicted_answer) and not answer_correct and evidence_correct
+        wrong_scope = bool(top_evidence) and not evidence_correct
+        contradiction_failure = (
+            float(trace_summary.get("max_contradiction_penalty", 0.0) or 0.0) >= 0.18
+            and not answer_correct
+        )
+
         return {
             "query_id": question.query_id,
+            "route_name": route_name,
+            "query_type": "exact_attribute_qa",
             "answer_correct": answer_correct,
             "predicted_answer": predicted_answer,
             "gt_answer": question.answer_text,
             "evidence": evidence_results,
+            "evidence_correct": evidence_correct,
+            "wrong_value": wrong_value,
+            "wrong_scope": wrong_scope,
+            "contradiction_failure": contradiction_failure,
+            "top_candidate_traces": top_candidate_traces,
+            "trace_summary": trace_summary,
             "font_height_px": question.font_height_px,
         }
 
@@ -215,6 +234,7 @@ class MicroTextEvaluator:
                 "object_id_accuracy": object_id_accuracy,
                 "page_id_accuracy": page_id_accuracy,
             },
+            "by_route": summarize_route_metrics(results),
             "by_font_size": font_bins,
             "per_question": results,
         }
@@ -288,6 +308,15 @@ class MicroTextEvaluator:
         print(f"  IoU Pass Rate (≥0.5):  {overall['iou_pass_rate']:.3f}")
         print(f"  Object ID Accuracy:    {overall['object_id_accuracy']:.3f}")
         print(f"  Page ID Accuracy:      {overall['page_id_accuracy']:.3f}")
+
+        print("\nPerformance by Route:")
+        for route_name, metrics in aggregated.get("by_route", {}).items():
+            print(f"  {route_name} (N={metrics['count']}):")
+            print(f"    Answer Accuracy:         {metrics['answer_accuracy']:.3f}")
+            print(f"    Evidence Correctness:    {metrics['evidence_correctness']:.3f}")
+            print(f"    Wrong Value Rate:        {metrics['wrong_value_rate']:.3f}")
+            print(f"    Wrong Scope Rate:        {metrics['wrong_scope_rate']:.3f}")
+            print(f"    Contradiction Fail Rate: {metrics['contradiction_failure_rate']:.3f}")
 
         print("\nPerformance by Font Size:")
         for bin_name, metrics in aggregated["by_font_size"].items():

@@ -60,6 +60,7 @@ tracerag-build-index = "tracerag.cli.build_index:main"
 tracerag-search = "tracerag.cli.demo_search:main"
 tracerag-chat = "tracerag.cli.chat_raw:main"
 tracerag-eval = "tracerag.cli.run_eval:main"
+tracerag-docvqa-prepare = "tracerag.cli.prepare_docvqa:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

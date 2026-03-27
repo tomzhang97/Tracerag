@@ -30,6 +30,158 @@ from tracerag.eval.runner import EvalRunner
 
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md", ".json", ".docx", ".pptx", ".xlsx"}
 
+QUERY_STOPWORDS = (
+    "的",
+    "是",
+    "多少",
+    "哪些",
+    "什么",
+    "怎么",
+    "请问",
+    "一下",
+    "吗",
+    "呢",
+    "啊",
+    "呀",
+    "有",
+    "和",
+    "与",
+)
+
+
+def _load_manifest(index_path: Path) -> Dict[str, str]:
+    import json
+
+    manifest_path = index_path / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _page_to_doc_id(page_id: str) -> str:
+    import re
+
+    return re.sub(r"_v\d+_p\d+$", "", page_id)
+
+
+def _query_codes(query: str):
+    import re
+
+    return [code.lower() for code in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_.]{1,}", query)]
+
+
+def _dedupe_preserve_order(items):
+    seen = set()
+    ordered = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def _clean_chinese_segment(segment: str) -> str:
+    cleaned = segment.strip()
+    for stopword in QUERY_STOPWORDS:
+        cleaned = cleaned.replace(stopword, "")
+    return cleaned
+
+
+def _extract_query_terms(query: str):
+    import re
+
+    codes = _query_codes(query)
+    chinese_segments = re.findall(r'[\u4e00-\u9fff]+', query)
+
+    cn_terms = []
+    for seg in chinese_segments:
+        seg = _clean_chinese_segment(seg)
+        if not seg:
+            continue
+        if len(seg) <= 4:
+            cn_terms.append(seg)
+            continue
+
+        cn_terms.append(seg)
+        for window in (2, 3):
+            if len(seg) < window:
+                continue
+            for k in range(len(seg) - window + 1):
+                cn_terms.append(seg[k:k+window])
+
+    query_terms = [t.lower() for t in query.split() if len(t) > 1]
+
+    return codes, _dedupe_preserve_order(cn_terms), _dedupe_preserve_order(query_terms)
+
+
+def _term_in_text(term: str, text: str, text_lower: str) -> bool:
+    if term.isascii():
+        return term.lower() in text_lower
+    return term in text
+
+
+def _compute_query_feature_weights(query_features, all_objects):
+    import math
+
+    if not query_features:
+        return {}
+
+    doc_ids = {obj.doc_id for obj in all_objects if getattr(obj, "doc_id", None)}
+    total_docs = max(len(doc_ids), 1)
+    doc_hits = {feature: set() for feature in query_features}
+
+    for obj in all_objects:
+        text = obj.text or ""
+        if not text:
+            continue
+        text_lower = text.lower()
+        doc_id = getattr(obj, "doc_id", None) or _page_to_doc_id(obj.page_id)
+        for feature in query_features:
+            if _term_in_text(feature, text, text_lower):
+                doc_hits[feature].add(doc_id)
+
+    weights = {}
+    for feature in query_features:
+        df = len(doc_hits[feature])
+        idf = math.log((total_docs + 1) / (df + 1)) + 1.0
+        if feature.isascii():
+            if any(char.isdigit() for char in feature):
+                idf += 1.5
+        elif len(feature) >= 4:
+            idf += 0.4
+        weights[feature] = idf
+
+    return weights
+
+
+def _metadata_doc_bonus(query: str, doc_id: str, manifest: Dict[str, str]) -> int:
+    path_str = (manifest.get(doc_id) or "").lower()
+    if not path_str:
+        return 0
+
+    bonus = 0
+    codes, cn_terms, query_terms = _extract_query_terms(query)
+
+    if any(code in path_str for code in codes):
+        bonus += 20
+
+    for term in cn_terms + query_terms:
+        if len(term) < 2:
+            continue
+        if term.isascii():
+            if term.lower() in path_str:
+                bonus += 4
+        elif term in path_str:
+            bonus += 6 if len(term) >= 4 else 3
+
+    return bonus
+
 def _ingest_single_file(file_path: Path, doc_id: str, version_id: str, output_dir: Path, config: dict, force: bool = False):
     """Ingest a single file (any supported format) into the index."""
     ext = file_path.suffix.lower()
@@ -77,9 +229,65 @@ def _ingest_single_file(file_path: Path, doc_id: str, version_id: str, output_di
 
 
 def _sanitize_id(name: str) -> str:
-    """Convert a filename into a safe doc_id (alphanumeric + underscores)."""
+    """Convert a filename into a safe doc_id while preserving Unicode text."""
     import re
-    return re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", name)
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", normalized)
+    sanitized = re.sub(r"\s+", "_", sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized).strip(" ._")
+    return sanitized or "document"
+
+
+def _render_query_result(result, spatial_index, manifest: Dict[str, str], show_evidence: bool = True, max_evidence: int = 10) -> str:
+    lines = [
+        "",
+        "=" * 40,
+        "TraceRAG Answer:",
+        "=" * 40,
+        result.answer or "(No answer synthesized)",
+    ]
+
+    if not show_evidence:
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "",
+            "=" * 40,
+            f"Top Evidence ({len(result.evidences)} found):",
+            "=" * 40,
+        ]
+    )
+
+    for index, ev in enumerate(result.evidences[:max_evidence], 1):
+        obj = spatial_index.get_object(ev.object_id)
+        obj_type = obj.obj_type if obj else "unknown"
+
+        base_doc_id = ev.doc_id.split("_v")[0].split("_task-")[0] if ev.doc_id else ""
+        orig_path_str = manifest.get(base_doc_id)
+        file_type = "unknown"
+        folder_name = "unknown"
+        chinese_title = base_doc_id
+
+        if orig_path_str:
+            orig_path = Path(orig_path_str)
+            file_type = orig_path.suffix.lower().lstrip(".")
+            folder_name = orig_path.parent.name
+            chinese_title = orig_path.stem
+
+        lines.append(f"{index}. [Score {ev.score:.4f}] {ev.object_id} (Type: {obj_type}, Page: {ev.page_id})")
+        lines.append(f"   Source: {chinese_title} | Folder: {folder_name} | Type: {file_type}")
+
+        if obj and obj.text and obj.text.strip():
+            snippet = obj.text[:120].replace("\n", " ") + "..."
+            lines.append(f"   Text: {snippet}")
+        else:
+            lines.append("   [No text content]")
+
+    lines.append("=" * 40)
+    return "\n".join(lines)
 
 
 def run_ingest(args):
@@ -204,6 +412,7 @@ def run_query(args):
     logger.info(f"Querying: {args.query}")
     
     index_path = Path(args.index)
+    manifest = _load_manifest(index_path)
     
     # 1. Load Structural
     # For demo, we just look for any objects.pkl in the structural subtree
@@ -249,87 +458,52 @@ def run_query(args):
         def __init__(self):
             pass
         def get_candidate_pages(self, query):
-            # 1. Extract alphanumeric codes (even short ones like "CSB", min 2 chars)
-            codes = re.findall(r'[A-Za-z0-9][A-Za-z0-9\-_.]{1,}', query)
-            
-            # 2. Extract Chinese segments (split on non-Chinese characters)
-            chinese_segments = re.findall(r'[\u4e00-\u9fff]+', query)
-            # Break long Chinese segments into overlapping 2-char windows for matching
-            cn_terms = []
-            for seg in chinese_segments:
-                if len(seg) <= 4:
-                    cn_terms.append(seg)
-                else:
-                    # Use the full segment plus sub-segments
-                    cn_terms.append(seg)
-                    for k in range(len(seg) - 1):
-                        cn_terms.append(seg[k:k+2])
-            
-            # 3. Also keep the raw query terms from whitespace split
-            query_terms = [t.lower() for t in query.split() if len(t) > 1]
+            codes, cn_terms, query_terms = _extract_query_terms(query)
+            query_features = _dedupe_preserve_order(codes + cn_terms + query_terms)
+            feature_weights = _compute_query_feature_weights(query_features, all_objects)
             
             logger.debug(f"Keyword extraction - codes: {codes}, cn_terms: {cn_terms}, query_terms: {query_terms}")
             
-            # Score each page
-            page_scores = {}  # page_id -> score
+            page_feature_hits = {}  # page_id -> matched query features
             
             for obj in all_objects:
                 text = (obj.text or "")
+                if not text:
+                    continue
                 text_lower = text.lower()
-                score = 0
-                
-                # Match alphanumeric codes (highest weight - these are identifiers)
-                for code in codes:
-                    if code.lower() in text_lower:
-                        score += 5
-                
-                # Match Chinese segments
-                for cn in cn_terms:
-                    if cn in text:
-                        score += 3
-                
-                # Match whole query (for exact substring matches)
-                if query.lower().rstrip("？?。") in text_lower:
-                    score += 3
-                
-                # Match individual whitespace-split terms
-                for term in query_terms:
-                    if term in text_lower:
-                        score += 1
-                
-                if score > 0:
-                    page_scores[obj.page_id] = page_scores.get(obj.page_id, 0) + score
+                matched_features = []
+                for feature in query_features:
+                    if _term_in_text(feature, text, text_lower):
+                        matched_features.append(feature)
+
+                if matched_features:
+                    page_hits = page_feature_hits.setdefault(obj.page_id, set())
+                    page_hits.update(matched_features)
+
+            page_scores = {
+                page_id: sum(feature_weights.get(feature, 0.0) for feature in matched_features)
+                for page_id, matched_features in page_feature_hits.items()
+            }
             
             if not page_scores:
                 logger.warning("No keyword matches found. Falling back to first 50 pages.")
                 return list(set(obj.page_id for obj in all_objects))[:50]
 
+            doc_scores = {}
+            for page_id, score in page_scores.items():
+                doc_id = _page_to_doc_id(page_id)
+                meta_bonus = _metadata_doc_bonus(query, doc_id, manifest)
+                doc_scores[doc_id] = max(doc_scores.get(doc_id, 0), score + meta_bonus)
+
             # Sort by score reversed to get top matches
-            ranked_pages = sorted(page_scores.items(), key=lambda kv: kv[1], reverse=True)
+            ranked_pages = sorted(
+                page_scores.items(),
+                key=lambda kv: (kv[1] + doc_scores.get(_page_to_doc_id(kv[0]), 0), kv[1]),
+                reverse=True,
+            )
             logger.info(f"Filter found {len(page_scores)} candidates. Top matches: {ranked_pages[:5]}")
             
-            # Document-level expansion: include ALL pages from top-scoring documents
-            # This ensures nearby pages (like page 8 when page 4 was matched) are considered
-            top_page_ids = [p[0] for p in ranked_pages[:50]]
-            
-            # Extract base document name from page IDs (normalize across ingestion variants)
-            def _get_doc_id(page_id):
-                # Strip _vN_pN suffix first
-                m = re.match(r'^(.+?)_v\d+_p\d+$', page_id)
-                stem = m.group(1) if m else page_id
-                # Strip task IDs (e.g., _task-CVYx7I8Ru2TQBZcgv94a224HQyhjF1pA)
-                stem = re.sub(r'_task-[A-Za-z0-9]+$', '', stem)
-                # Strip trailing underscores/hyphens used as padding
-                stem = stem.rstrip('_- ')
-                return stem
-            
-            # Find top documents by highest page score
-            # Expand from TOP 3 documents (not just 1) to ensure cross-document diversity
-            doc_scores = {}
-            for page_id, score in ranked_pages:
-                doc_id = _get_doc_id(page_id)
-                if doc_id not in doc_scores or score > doc_scores[doc_id]:
-                    doc_scores[doc_id] = score
+            # Find top documents by highest page score plus metadata prior.
             top_docs = sorted(doc_scores.items(), key=lambda kv: kv[1], reverse=True)
             
             # Take top 3 documents for expansion
@@ -337,6 +511,18 @@ def run_query(args):
             expand_doc_ids = [d[0] for d in top_docs[:num_expand_docs]]
             
             logger.info(f"Top {num_expand_docs} documents for expansion: {[(d[0], d[1]) for d in top_docs[:num_expand_docs]]}")
+
+            # Start from the best pages within the strongest documents first.
+            expanded_doc_ids = set(expand_doc_ids)
+            prioritized_pages = [
+                page_id for page_id, _ in ranked_pages
+                if _page_to_doc_id(page_id) in expanded_doc_ids
+            ]
+            fallback_pages = [
+                page_id for page_id, _ in ranked_pages
+                if _page_to_doc_id(page_id) not in expanded_doc_ids
+            ]
+            top_page_ids = _dedupe_preserve_order(prioritized_pages + fallback_pages)[:50]
 
             # Start with keyword-matched pages (ordered by score)
             expanded = list(top_page_ids)
@@ -351,7 +537,7 @@ def run_query(args):
                 for obj in all_objects:
                     if added >= budget:
                         break
-                    if obj.page_id not in seen and _get_doc_id(obj.page_id) == expand_doc_id:
+                    if obj.page_id not in seen and _page_to_doc_id(obj.page_id) == expand_doc_id:
                         expanded.append(obj.page_id)
                         seen.add(obj.page_id)
                         added += 1
@@ -361,20 +547,7 @@ def run_query(args):
             # Cap at 100 to keep ColPali manageable
             return expanded[:100]
 
-
-
-    # Build or load manifest to resolve original document paths
-    import json
     manifest_path = index_path / "manifest.json"
-    manifest = {}
-    
-    if manifest_path.exists():
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-        except Exception as e:
-            logger.warning(f"Error loading manifest: {e}")
-            
     if not manifest:
         logger.warning(f"No manifest.json found at {manifest_path}. Source filenames will be marked as 'unknown'. Please reingest to fix.")
 
@@ -389,40 +562,7 @@ def run_query(args):
     )
     
     result = system.answer(args.query)
-    
-    print("\n" + "="*40)
-    print("TraceRAG Answer:")
-    print("="*40)
-    print(result.answer or "(No answer synthesized)")
-    print("\n" + "="*40)
-    print(f"Top Evidence ({len(result.evidences)} found):")
-    print("="*40)
-    for i, ev in enumerate(result.evidences[:10], 1): # Show more for debugging
-        obj = spatial_index.get_object(ev.object_id)
-        obj_type = obj.obj_type if obj else "unknown"
-        
-        # Resolve original metadata from manifest
-        base_doc_id = ev.doc_id.split("_v")[0].split("_task-")[0] if ev.doc_id else ""
-        orig_path_str = manifest.get(base_doc_id)
-        file_type = "unknown"
-        folder_name = "unknown"
-        chinese_title = base_doc_id
-        
-        if orig_path_str:
-            orig_path = Path(orig_path_str)
-            file_type = orig_path.suffix.lower().lstrip('.')
-            folder_name = orig_path.parent.name
-            chinese_title = orig_path.stem
-
-        print(f"{i}. [Score {ev.score:.4f}] {ev.object_id} (Type: {obj_type}, Page: {ev.page_id})")
-        print(f"   Source: {chinese_title} | Folder: {folder_name} | Type: {file_type}")
-        
-        if obj and obj.text and len(obj.text.strip()) > 0:
-            snippet = obj.text[:120].replace("\n", " ") + "..."
-            print(f"   Text: {snippet}")
-        else:
-            print(f"   [No text content]")
-    print("="*40)
+    print(_render_query_result(result, spatial_index, manifest, show_evidence=True, max_evidence=10))
 
 def run_test_llm(args):
     config = load_config(args.config)

@@ -6,6 +6,7 @@ to generate answers and extract certified claims.
 """
 
 import json
+import re
 from typing import List, Dict, Any, Optional
 from loguru import logger
 
@@ -126,7 +127,7 @@ class LLMAnswerer:
 
         # Parse response
         try:
-            result = json.loads(response)
+            result = json.loads(self._extract_json_payload(response))
             return result
         except json.JSONDecodeError:
             logger.warning("Failed to parse LLM JSON response, returning raw answer")
@@ -154,14 +155,30 @@ class LLMAnswerer:
         Returns:
             Prompt string
         """
+        max_evidences = self.config.get("max_evidences", 50)
+        max_chars_per_evidence = self.config.get("max_chars_per_evidence", 800)
+        max_total_evidence_chars = self.config.get("max_total_evidence_chars", 12000)
+        max_prompt_chars = self.config.get("max_prompt_chars", 20000)
+
         # Create evidence snippets with IDs
         evidence_snippets = []
-        for i, ev in enumerate(evidences[:50], 1):  # Limit to 50 evidences to support long lists
+        total_evidence_chars = 0
+        for i, ev in enumerate(evidences[:max_evidences], 1):
             ev_id = f"E{i}"
-            text = evidence_texts.get(ev.object_id, "")
+            text = (evidence_texts.get(ev.object_id, "") or "").strip()
+            if max_chars_per_evidence > 0 and len(text) > max_chars_per_evidence:
+                text = text[:max_chars_per_evidence].rstrip() + "..."
+
+            if max_total_evidence_chars > 0:
+                remaining_budget = max_total_evidence_chars - total_evidence_chars
+                if remaining_budget <= 0:
+                    break
+                if len(text) > remaining_budget:
+                    text = text[:remaining_budget].rstrip() + "..."
 
             snippet = f"[{ev_id}] (Page: {ev.page_id}, Type: {ev.obj_type})\n{text}\n"
             evidence_snippets.append(snippet)
+            total_evidence_chars += len(text)
 
         evidences_str = "\n".join(evidence_snippets)
 
@@ -195,7 +212,7 @@ Instructions:
 Important:
 - Only include claims that are directly supported by the evidence
 - Each claim should reference at least one evidence ID
-- Keep answer concise and technical
+- Keep answer concise and technical, and do not mention evidence IDs in the natural-language answer
 - Maximum {self.max_claims} claims
 
 Critical - Aggregation and Arithmetic:
@@ -208,7 +225,71 @@ Critical - Aggregation and Arithmetic:
 
 JSON Response:"""
 
-        return prompt
+        if max_prompt_chars > 0 and len(prompt) > max_prompt_chars:
+            overflow = len(prompt) - max_prompt_chars
+            if evidence_snippets and overflow > 0:
+                trimmed_snippets = list(evidence_snippets)
+                while trimmed_snippets and len(prompt) > max_prompt_chars:
+                    trimmed_snippets.pop()
+                    evidences_str = "\n".join(trimmed_snippets)
+                    prompt = f"""You are a technical documentation assistant. Answer the user's query based on the provided evidence from technical documents.
+
+Query: {query}
+Query Type: {query_type}
+
+Evidence:
+{evidences_str}
+
+Instructions:
+1. Provide a clear, concise answer to the query
+2. Extract factual claims from your answer
+3. For each claim, list the evidence IDs (E1, E2, etc.) that support it
+4. Return your response as JSON with this exact structure:
+
+{{
+  "answer": "Your natural language answer here",
+  "claims": [
+    {{
+      "text": "First factual claim",
+      "value": "Structured value if applicable (e.g., '50 Nm'), otherwise null",
+      "entity_id": "Entity this claim is about (e.g., 'V-101'), otherwise null",
+      "claim_type": "attribute|location|procedure_step|general",
+      "evidence_ids": ["E1", "E3"]
+    }}
+  ]
+}}
+
+Important:
+- Only include claims that are directly supported by the evidence
+- Each claim should reference at least one evidence ID
+- Keep answer concise and technical, and do not mention evidence IDs in the natural-language answer
+- Maximum {self.max_claims} claims
+
+Critical - Aggregation and Arithmetic:
+- Use the summary total (e.g., "åˆè®¡", "æ€»é‡") as the primary authoritative value if it exists.
+- Perform a cross-check/validation: identify individual line items (e.g., weights for each box) and verify if their sum matches the summary total.
+- If they match exactly, please confirm this verification in your answer.
+- If they DO NOT match, look for reasons given in the text (e.g., "missing data", "not yet weighed", "shipment delayed").
+- In case of a discrepancy with no explanation, provide the summary total as the official value but note that the sum of listed items differs.
+- If some items are cut off (not in the evidence) but a summary page is present, rely on the summary page as the official total.
+
+JSON Response:"""
+
+        return prompt[:max_prompt_chars]
+
+    def _extract_json_payload(self, response: str) -> str:
+        """Extract a JSON object from plain text or fenced markdown output."""
+        stripped = response.strip()
+        if stripped.startswith("```"):
+            fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", stripped, re.DOTALL)
+            if fenced:
+                return fenced.group(1)
+
+        first_brace = stripped.find("{")
+        last_brace = stripped.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            return stripped[first_brace:last_brace + 1]
+        return stripped
 
     def _call_llm(self, prompt: str) -> str:
         """
