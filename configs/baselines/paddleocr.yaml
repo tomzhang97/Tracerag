@@ -1,2 +1,20 @@
 name: paddleocr
 type: baseline
+task: ocr
+
+ocr:
+  engine: paddleocr
+  version: PP-OCRv5         # PP-OCRv5 is the current strong open-source OCR line
+  lang: en
+  use_angle_cls: true       # enable orientation classifier
+  use_gpu: false            # set to true if GPU available
+  conf_threshold: 0.3
+
+eval:
+  metrics: [cer, wer, answer_em, answer_f1]
+  tasks: [microtext, docvqa]
+
+notes: >
+  PP-OCRv5 is a strong current open OCR line for document text recognition.
+  Especially important for micro-text and exact value extraction.
+  Better than Tesseract on dense engineering drawings with tight tolerances.

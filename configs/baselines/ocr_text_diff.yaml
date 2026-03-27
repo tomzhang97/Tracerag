@@ -1,0 +1,24 @@
+name: ocr_text_diff
+type: baseline
+task: visualdiff
+
+ocr:
+  engine: tesseract         # "tesseract" or "paddleocr"
+  lang: eng
+  config: "--psm 6"
+  dpi: 300
+  try_rotations: false      # disable for diff task (pages are assumed upright)
+  conf_threshold: 30.0
+
+diff:
+  context_lines: 2          # lines of context around each changed block
+
+eval:
+  metrics: [change_class_accuracy, version_accuracy]
+  tasks: [visualdiff]
+
+notes: >
+  OCR-text diff baseline for the revision / visual-diff task.
+  Runs Tesseract (or PaddleOCR) on both page versions and uses difflib
+  to identify changed lines.  Paired with AbsDiff as the primary naive
+  diff comparator for the visual-diff task.

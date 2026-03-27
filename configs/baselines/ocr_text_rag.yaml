@@ -1,0 +1,43 @@
+name: ocr_text_rag
+type: baseline
+task: qa_retrieval
+
+ocr:
+  engine: tesseract         # "tesseract" or "paddleocr"
+  lang: eng
+  config: "--psm 6"
+  dpi: 300
+  try_rotations: true
+  conf_threshold: 30.0
+
+retrieval:
+  index_type: bm25          # "bm25" or "faiss"
+  top_k: 5
+
+# Shared downstream answerer — same model across ColPali, ColQwen2, TraceRAG
+answerer:
+  provider: openai_compatible
+  model_name: Qwen/Qwen2.5-7B-Instruct
+  base_url: http://localhost:8000/v1   # local vLLM endpoint
+  api_key: EMPTY
+  temperature: 0.0
+  max_tokens: 1024
+  claim_extraction:
+    enabled: true
+    max_claims_per_answer: 5
+
+eval:
+  metrics: [answer_em, answer_f1, cer, page_recall]
+  tasks: [microtext, docvqa]
+
+notes: >
+  "What if I just OCR the docs and do normal RAG?"
+  Tesseract (or PaddleOCR) → BM25 page retrieval → Qwen2.5-7B-Instruct reader.
+  The shared answerer is the same as ColPali and TraceRAG to isolate the
+  retrieval and grounding contributions.
+
+  To switch to PaddleOCR:
+    ocr.engine: paddleocr
+    ocr.version: PP-OCRv5
+  To switch to dense retrieval:
+    retrieval.index_type: faiss

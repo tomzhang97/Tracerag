@@ -1,2 +1,16 @@
 name: siamese_diff
 type: baseline
+task: visualdiff
+
+diff:
+  model_path: null          # set to a torchscript checkpoint; null = pixel-diff fallback
+  threshold: 50             # pixel-difference threshold when using fallback
+
+eval:
+  metrics: [iou_50, change_class_accuracy, version_accuracy]
+  tasks: [visualdiff]
+
+notes: >
+  Siamese ResNet50 change-detection baseline.  Expected IoU@0.5 < 0.3.
+  Currently falls back to pixel diff; provide a model_path checkpoint to
+  enable the learned feature-level comparison.

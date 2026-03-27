@@ -1,2 +1,20 @@
 name: tesseract
 type: baseline
+task: ocr
+
+ocr:
+  engine: tesseract
+  lang: eng
+  config: "--psm 6"        # PSM 6 = assume uniform block of text (good for docs)
+  dpi: 300
+  try_rotations: true      # try 0/90/180/270°, keep best mean confidence
+  conf_threshold: 30.0     # minimum word confidence (0–100 scale internally)
+
+eval:
+  metrics: [cer, wer, answer_em, answer_f1]
+  tasks: [microtext, docvqa]
+
+notes: >
+  Classical OCR floor.  Strong on printed text, weak on micro-text in
+  complex engineering drawings without pre-processing (deskewing, binarisation).
+  Evaluated with try_rotations=true to handle upright vs. landscape pages.

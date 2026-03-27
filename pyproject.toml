@@ -54,6 +54,35 @@ dev = [
     "mypy>=1.7.0",
 ]
 
+# Baseline-specific extras (install as needed):
+#   pip install -e ".[ocr]"         — Tesseract + PaddleOCR
+#   pip install -e ".[vision]"      — ColPali / ColQwen2
+#   pip install -e ".[vlm]"         — Qwen2.5-VL
+#   pip install -e ".[baselines]"   — all of the above
+ocr = [
+    "pytesseract>=0.3.10",          # Tesseract Python wrapper (needs Tesseract binary)
+    "paddleocr>=2.7.0",             # PP-OCRv5
+    "paddlepaddle>=2.6.0",          # PaddlePaddle CPU runtime
+    "editdistance>=0.6.3",          # CER metric in baseline runner
+]
+vision = [
+    "colpali-engine>=0.3.0",        # ColPali / ColQwen2 loaders + processors
+]
+vlm = [
+    "transformers>=4.45.0",         # Qwen2.5-VL requires ≥4.45
+    "qwen-vl-utils>=0.0.6",         # process_vision_info helper
+]
+baselines = [
+    "pytesseract>=0.3.10",
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.6.0",
+    "colpali-engine>=0.3.0",
+    "transformers>=4.45.0",
+    "qwen-vl-utils>=0.0.6",
+    "editdistance>=0.6.3",
+    "scipy>=1.11.0",                # connected-component labelling in AbsDiff
+]
+
 [project.scripts]
 tracerag-ingest = "tracerag.cli.ingest_pdf:main"
 tracerag-build-index = "tracerag.cli.build_index:main"

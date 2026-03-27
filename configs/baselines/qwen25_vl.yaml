@@ -1,0 +1,33 @@
+name: qwen25_vl
+type: baseline
+task: end_to_end_vlm
+
+vlm:
+  model_name: Qwen/Qwen2.5-VL-7B-Instruct
+  device: auto              # "cuda" or "cpu"; "auto" picks cuda if available
+  max_new_tokens: 512
+  max_pages: 8              # hard cap on pages sent per query (VRAM budget)
+  min_pixels: 200704        # 256*28*28 — lower bound on image resolution
+  max_pixels: 1003520       # 1280*28*28 — upper bound (fits 7B on 24 GB GPU)
+
+retrieval:
+  # Optional BM25 pre-filter before feeding pages to the VLM.
+  # Set enabled: false to pass all pages (up to max_pages) directly.
+  enabled: true
+  ocr_engine: tesseract     # OCR used only for BM25 page pre-selection
+  top_k: 5
+
+eval:
+  metrics: [answer_em, answer_f1, cer]
+  tasks: [microtext, docvqa, visualdiff]
+
+notes: >
+  End-to-end VLM baseline: pages are fed directly to Qwen2.5-VL-7B-Instruct.
+  This is a SEPARATE baseline from the shared-answerer retrieval stack —
+  it answers "what if I just give the pages to a strong VLM?"
+
+  Qwen2.5-VL is explicitly positioned for text, charts, icons, graphics,
+  and layouts in images.
+
+  Fallback model (if 2.5 is unavailable):
+    vlm.model_name: Qwen/Qwen2-VL-7B-Instruct

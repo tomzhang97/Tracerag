@@ -1,2 +1,16 @@
 name: absdiff
 type: baseline
+task: visualdiff
+
+diff:
+  threshold: 30             # pixel-level difference threshold (0–255)
+  min_area: 50              # minimum connected-region area (px²) to report
+
+eval:
+  metrics: [iou_50, change_class_accuracy, version_accuracy]
+  tasks: [visualdiff]
+
+notes: >
+  Naive absolute pixel-difference baseline.  Resize both images to the same
+  resolution before diffing; convert to grayscale.  Serves as the lower
+  bound for the visual-diff task.

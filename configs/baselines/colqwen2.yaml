@@ -1,2 +1,30 @@
 name: colqwen2
 type: baseline
+task: visual_retrieval
+
+retriever:
+  model_name: vidore/colqwen2-v1.0
+  device: auto              # "cuda" or "cpu"; "auto" picks cuda if available
+  batch_size: 4
+  top_k: 5
+
+# Shared downstream answerer — same model used across ColPali, ColQwen2, TraceRAG
+answerer:
+  provider: openai_compatible
+  model_name: Qwen/Qwen2.5-7B-Instruct
+  base_url: http://localhost:8000/v1   # local vLLM endpoint
+  api_key: EMPTY
+  temperature: 0.0
+  max_tokens: 1024
+  claim_extraction:
+    enabled: true
+    max_claims_per_answer: 5
+
+eval:
+  metrics: [answer_em, answer_f1, page_recall, evidence_precision]
+  tasks: [microtext, docvqa, visualdiff]
+
+notes: >
+  ColQwen2 v1.0 visual document retrieval baseline using late interaction (MaxSim)
+  over Qwen2-VL patch embeddings.  Paired with Qwen2.5-7B-Instruct as the
+  shared answerer to isolate the retrieval contribution.
